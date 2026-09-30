@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from disc_goblin.config import Settings
-from disc_goblin.db import Database
-from disc_goblin.makemkv import SimulationBackend
-from disc_goblin.service import RipperService, stage_bytes
+from openripper.config import Settings
+from openripper.db import Database
+from openripper.makemkv import SimulationBackend
+from openripper.service import RipperService, stage_bytes
 
 
 def test_stage_bytes_counts_growing_mkv_files(tmp_path: Path) -> None:
@@ -20,6 +20,7 @@ def test_stage_bytes_counts_growing_mkv_files(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_simulated_disc_rips_then_waits_for_safe_publish(tmp_path: Path) -> None:
     settings = Settings(
+        output_mode="library",
         library_root=tmp_path / "library",
         movie_root=tmp_path / "library" / "Movies",
         tv_root=tmp_path / "library" / "TV",
@@ -27,7 +28,7 @@ async def test_simulated_disc_rips_then_waits_for_safe_publish(tmp_path: Path) -
         poll_interval=999,
         eject_on_success=False,
         udev_discovery=False,
-        firmware_audit=True,
+        compatibility_check=True,
         simulate=True,
     )
     database = Database(settings.database_url)
@@ -72,7 +73,7 @@ async def test_open_tray_refuses_active_drive(tmp_path: Path) -> None:
         database_url=f"sqlite:///{tmp_path / 'service.db'}",
         eject_on_success=False,
         udev_discovery=False,
-        firmware_audit=False,
+        compatibility_check=False,
         simulate=True,
     )
     database = Database(settings.database_url)
@@ -112,7 +113,7 @@ async def test_queue_drive_reuses_existing_active_job(tmp_path: Path) -> None:
         tv_root=tmp_path / "library" / "TV",
         database_url=f"sqlite:///{tmp_path / 'service.db'}",
         udev_discovery=False,
-        firmware_audit=False,
+        compatibility_check=False,
         simulate=True,
     )
     database = Database(settings.database_url)

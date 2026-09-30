@@ -1,15 +1,15 @@
-name: disc-goblin
+name: openripper
 
 services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: "${POSTGRES_DB:-disc_goblin}"
-      POSTGRES_USER: "${POSTGRES_USER:-disc_goblin}"
+      POSTGRES_DB: "${POSTGRES_DB:-openripper}"
+      POSTGRES_USER: "${POSTGRES_USER:-openripper}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-change-me}"
     volumes:
-      - disc-goblin-postgres:/var/lib/postgresql/data
+      - openripper-postgres:/var/lib/postgresql/data
     healthcheck:
       test:
         - CMD-SHELL
@@ -18,11 +18,11 @@ services:
       timeout: 3s
       retries: 20
 
-  disc-goblin:
+  openripper:
     build:
       context: .
-    image: disc-goblin:local
-    container_name: disc-goblin
+    image: openripper:local
+    container_name: openripper
     init: true
     restart: unless-stopped
     privileged: true
@@ -30,32 +30,35 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "${DISC_GOBLIN_PORT:-8080}:8080"
+      - "${OPENRIPPER_PORT:-8080}:8080"
     environment:
-      DISC_GOBLIN_DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-disc_goblin}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-disc_goblin}"
-      DISC_GOBLIN_AUTO_RIP: "${DISC_GOBLIN_AUTO_RIP:-true}"
-      DISC_GOBLIN_AUTO_PUBLISH_CONFIDENCE: "${DISC_GOBLIN_AUTO_PUBLISH_CONFIDENCE:-0.88}"
-      DISC_GOBLIN_EJECT_ON_SUCCESS: "${DISC_GOBLIN_EJECT_ON_SUCCESS:-true}"
-      DISC_GOBLIN_MAKEMKV_KEY: "${DISC_GOBLIN_MAKEMKV_KEY:-}"
-      DISC_GOBLIN_MAX_CONCURRENT_RIPS: "${DISC_GOBLIN_MAX_CONCURRENT_RIPS:-2}"
-      DISC_GOBLIN_MIN_TITLE_SECONDS: "${DISC_GOBLIN_MIN_TITLE_SECONDS:-1200}"
-      DISC_GOBLIN_POLL_INTERVAL: "${DISC_GOBLIN_POLL_INTERVAL:-8}"
-      DISC_GOBLIN_RIP_MODE: "${DISC_GOBLIN_RIP_MODE:-smart}"
-      DISC_GOBLIN_TMDB_TOKEN: "${DISC_GOBLIN_TMDB_TOKEN:-}"
-      DISC_GOBLIN_UDEV_DISCOVERY: "${DISC_GOBLIN_UDEV_DISCOVERY:-true}"
-      DISC_GOBLIN_FIRMWARE_AUDIT: "${DISC_GOBLIN_FIRMWARE_AUDIT:-true}"
-      DISC_GOBLIN_AUTO_FLASH: "${DISC_GOBLIN_AUTO_FLASH:-false}"
-      DISC_GOBLIN_MOVIE_ROOT: "${DISC_GOBLIN_MOVIE_ROOT:-/media/library/Movies}"
-      DISC_GOBLIN_TV_ROOT: "${DISC_GOBLIN_TV_ROOT:-/media/library/TV}"
+      OPENRIPPER_DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-openripper}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-openripper}"
+      OPENRIPPER_AUTO_RIP: "${OPENRIPPER_AUTO_RIP:-true}"
+      OPENRIPPER_OUTPUT_MODE: "${OPENRIPPER_OUTPUT_MODE:-disc}"
+      OPENRIPPER_PREFERENCES_PATH: /config/openripper.json
+      OPENRIPPER_SIMULATE: "${OPENRIPPER_SIMULATE:-false}"
+      OPENRIPPER_AUTO_PUBLISH_CONFIDENCE: "${OPENRIPPER_AUTO_PUBLISH_CONFIDENCE:-0.88}"
+      OPENRIPPER_EJECT_ON_SUCCESS: "${OPENRIPPER_EJECT_ON_SUCCESS:-true}"
+      OPENRIPPER_MAKEMKV_KEY: "${OPENRIPPER_MAKEMKV_KEY:-}"
+      OPENRIPPER_MAX_CONCURRENT_RIPS: "${OPENRIPPER_MAX_CONCURRENT_RIPS:-2}"
+      OPENRIPPER_MIN_TITLE_SECONDS: "${OPENRIPPER_MIN_TITLE_SECONDS:-1200}"
+      OPENRIPPER_POLL_INTERVAL: "${OPENRIPPER_POLL_INTERVAL:-8}"
+      OPENRIPPER_RIP_MODE: "${OPENRIPPER_RIP_MODE:-smart}"
+      OPENRIPPER_TMDB_TOKEN: "${OPENRIPPER_TMDB_TOKEN:-}"
+      OPENRIPPER_UDEV_DISCOVERY: "${OPENRIPPER_UDEV_DISCOVERY:-true}"
+      OPENRIPPER_COMPATIBILITY_CHECK: "${OPENRIPPER_COMPATIBILITY_CHECK:-true}"
+      OPENRIPPER_MOVIE_ROOT: "${OPENRIPPER_MOVIE_ROOT:-/media/library/Movies}"
+      OPENRIPPER_TV_ROOT: "${OPENRIPPER_TV_ROOT:-/media/library/TV}"
     volumes:
       - ./config:/config
       - /dev:/dev
       - /run/udev:/run/udev:ro
       - type: bind
-        source: "${DISC_GOBLIN_LIBRARY_HOST_PATH:-./library}"
+        source: "${OPENRIPPER_LIBRARY_HOST_PATH:-./library}"
         target: /media/library
     # MakeMKV discovers both /dev/sr* block devices and their /dev/sg* SCSI
     # generic partners. See docs/DEPLOYMENT.md for a least-privilege override.
 
 volumes:
-  disc-goblin-postgres:
+  openripper-postgres:
+    name: "${OPENRIPPER_POSTGRES_VOLUME:-openripper-postgres}"

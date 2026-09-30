@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import tempfile
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -32,8 +35,12 @@ class MetadataUpdate(BaseModel):
     selected_title_ids: list[int] | None = None
 
 
-class FirmwareFlashRequest(BaseModel):
-    confirmation: str
+class PreferencesUpdate(BaseModel):
+    library_root: str = Field(min_length=1, max_length=1000)
+    auto_rip: bool
+    eject_on_success: bool
+    output_mode: str = Field(pattern="^(disc|library)$")
+    rip_mode: str = Field(pattern="^(smart|main_feature|all)$")
 
 
 def websocket_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -57,12 +64,14 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await service.start()
-        yield
-        await service.stop()
+        try:
+            yield
+        finally:
+            await service.stop()
 
     app = FastAPI(
-        title="Disc Goblin",
-        description="Automatic MakeMKV ingest for Plex and Jellyfin libraries",
+        title="OpenRipper",
+        description="Self-hosted automatic DVD and Blu-ray ripping to your own storage",
         version=__version__,
         lifespan=lifespan,
         docs_url="/api/docs",
@@ -85,6 +94,8 @@ def create_app(
             "status": "ok",
             "version": __version__,
             "simulation": settings.simulate,
+            "auto_rip": settings.auto_rip,
+            "output_mode": settings.output_mode,
             "library_root": str(settings.library_root),
             "movie_root": str(settings.movie_root),
             "tv_root": str(settings.tv_root),
@@ -94,6 +105,57 @@ def create_app(
             "database_ready": database.ping(),
             "discovery": "udev+makemkv" if settings.udev_discovery else "makemkv-polling",
         }
+
+    @app.get("/api/settings")
+    async def get_settings() -> dict[str, Any]:
+        return settings.public_preferences()
+
+    @app.put("/api/settings")
+    async def save_settings(payload: PreferencesUpdate) -> dict[str, Any]:
+        async with service._poll_lock:
+            busy = database.fetchone(
+                "SELECT id FROM jobs WHERE status IN "
+                "('scanning','queued','ripping','publishing') LIMIT 1"
+            )
+            if busy:
+                raise HTTPException(
+                    409, "Wait for the current rip to finish before changing settings"
+                )
+            root = Path(payload.library_root.strip()).expanduser()
+            if not root.is_absolute():
+                raise HTTPException(422, "Use an absolute destination path on the ripper host")
+            root = root.resolve()
+            values = payload.model_dump()
+            values["library_root"] = root
+            updated = replace(settings, **values)
+            root_changed = root != settings.library_root.resolve()
+            if root_changed:
+                updated.movie_root = root / "Movies"
+                updated.tv_root = root / "TV"
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryFile(dir=root):
+                    pass
+                updated.staging_root.mkdir(parents=True, exist_ok=True)
+                path = settings.preferences_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                persisted = updated.public_preferences()
+                persisted.update(movie_root=str(updated.movie_root), tv_root=str(updated.tv_root))
+                with tempfile.NamedTemporaryFile(
+                    mode="w", dir=path.parent, suffix=".tmp", delete=False, encoding="utf-8"
+                ) as output:
+                    temporary = Path(output.name)
+                    json.dump(persisted, output, indent=2)
+                try:
+                    temporary.replace(path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            except OSError as exc:
+                raise HTTPException(422, f"Could not save destination/settings: {exc}") from exc
+            for field in (*values, "movie_root", "tv_root"):
+                setattr(settings, field, getattr(updated, field))
+            database.add_event("Ripping settings saved")
+        return settings.public_preferences()
 
     @app.get("/api/overview")
     async def overview() -> dict[str, Any]:
@@ -142,6 +204,8 @@ def create_app(
             raise HTTPException(404, "Drive not found")
         if not row["disc_name"]:
             raise HTTPException(409, "There is no disc in this drive")
+        if not row["online"]:
+            raise HTTPException(409, "This drive is disconnected")
         drive = DriveInfo(
             id=row["id"],
             disc_index=row["disc_index"],
@@ -163,24 +227,12 @@ def create_app(
             raise HTTPException(409, str(exc)) from exc
         return {"status": "tray_opened"}
 
-    @app.post("/api/drives/{drive_id}/firmware/audit")
-    async def audit_firmware(drive_id: str) -> dict[str, Any]:
+    @app.post("/api/drives/{drive_id}/compatibility")
+    async def check_compatibility(drive_id: str) -> dict[str, Any]:
         try:
-            return await service.audit_drive(drive_id)
+            return await service.check_compatibility(drive_id)
         except KeyError as exc:
             raise HTTPException(404, "Drive not found") from exc
-
-    @app.post("/api/drives/{drive_id}/firmware/flash")
-    async def flash_firmware(drive_id: str, payload: FirmwareFlashRequest) -> dict[str, Any]:
-        expected = f"FLASH {drive_id}"
-        if payload.confirmation != expected:
-            raise HTTPException(400, f"Confirmation must exactly match: {expected}")
-        try:
-            return await service.flash_drive(drive_id, automatic=False)
-        except KeyError as exc:
-            raise HTTPException(404, "Drive not found") from exc
-        except (ValueError, FileNotFoundError) as exc:
-            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/poll", status_code=202)
     async def poll_now(

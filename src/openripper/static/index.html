@@ -6,22 +6,22 @@
     <meta name="theme-color" content="#090b0d" />
     <meta
       name="description"
-      content="Disc Goblin — automatic Blu-ray ingest with safe Plex and Jellyfin naming."
+      content="Self-hosted, open source DVD and Blu-ray ripping. Insert a disc and save it automatically to your destination."
     />
-    <title>Disc Goblin</title>
-    <link rel="stylesheet" href="/assets/styles.css" />
-    <script src="/assets/app.js" defer></script>
+    <title>OpenRipper</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=0.2.0" />
+    <script src="/assets/app.js?v=0.2.0" defer></script>
   </head>
   <body>
-    <div class="noise" aria-hidden="true"></div>
+    <a class="skip-link" href="#drives-heading">Skip to drives</a>
     <header class="topbar">
-      <a class="brand" href="/" aria-label="Disc Goblin home">
+      <a class="brand" href="/" aria-label="OpenRipper home">
         <span class="brand-mark" aria-hidden="true">
           <span class="brand-hole"></span>
         </span>
         <span>
-          <strong>DISC GOBLIN</strong>
-          <small>OPTICAL INGEST UNIT</small>
+          <strong>OPENRIPPER</strong>
+          <small>DVD + BLU-RAY</small>
         </span>
       </a>
       <div class="topbar-actions">
@@ -38,57 +38,53 @@
     <main>
       <section class="hero">
         <div>
-          <p class="eyebrow">PHYSICAL MEDIA, DOMESTICATED</p>
-          <h1>Feed it discs.<br /><em>Get a clean library.</em></h1>
+          <h1>Insert a disc.<br /><em>We’ll take it from here.</em></h1>
           <p class="hero-copy">
-            Blu-rays rip the moment they land. Disc Goblin stages every byte,
-            verifies the identity, and publishes media using Plex and Jellyfin-safe names.
+            Your discs. Your storage. DVD and Blu-ray backups that start automatically
+            and stay on your own server.
           </p>
         </div>
-        <div class="hero-orbit" aria-hidden="true">
-          <div class="orbit orbit-one"></div>
-          <div class="orbit orbit-two"></div>
-          <div class="disc">
-            <div class="disc-shine"></div>
-            <div class="disc-ring"></div>
-            <div class="disc-hole"></div>
+        <div class="destination-panel" aria-label="Ripping configuration">
+          <div class="destination-heading">
+            <strong>Save destination</strong>
+            <button id="settings-button" class="button button-quiet" type="button">Configure</button>
           </div>
-          <span class="orbit-label label-a">SCAN</span>
-          <span class="orbit-label label-b">RIP</span>
-          <span class="orbit-label label-c">NAME</span>
+          <p id="destination-path" class="destination-path">Loading destination…</p>
+          <p id="automation-status" class="automation-status">Checking automatic ripping…</p>
+          <p id="output-description" class="destination-note"></p>
         </div>
       </section>
+      <p id="simulation-notice" class="simulation-notice" hidden>Demo mode — drives are simulated and output files are placeholders.</p>
 
       <section class="metrics" aria-label="Library stats">
         <article>
           <span>DRIVES ONLINE</span>
           <strong id="metric-drives">—</strong>
-          <small id="metric-drives-note">Looking for hardware</small>
+          <small id="metric-drives-note">Searching for drives</small>
         </article>
         <article>
-          <span>ACTIVE INGESTS</span>
+          <span>RIPPING NOW</span>
           <strong id="metric-active">—</strong>
-          <small>Across every connected drive</small>
+          <small>Across all drives</small>
         </article>
         <article>
           <span>COMPLETED</span>
           <strong id="metric-complete">—</strong>
-          <small>Published to your library</small>
+          <small>Saved to destination</small>
         </article>
         <article>
-          <span>NEEDS A HUMAN</span>
+          <span>NEEDS REVIEW</span>
           <strong id="metric-review">—</strong>
-          <small>Safe in staging, never misfiled</small>
+          <small>Waiting for your input</small>
         </article>
       </section>
 
       <section class="section" aria-labelledby="drives-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">HARDWARE DECK</p>
             <h2 id="drives-heading">Connected drives</h2>
           </div>
-          <span id="drive-summary" class="section-note">Discovering optical hardware…</span>
+          <span id="drive-summary" class="section-note">Looking for drives…</span>
         </div>
         <div id="drive-grid" class="drive-grid" aria-live="polite">
           <div class="skeleton-card"></div>
@@ -99,10 +95,9 @@
       <section class="section" aria-labelledby="queue-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">LIVE FLOOR</p>
-            <h2 id="queue-heading">Ingest queue</h2>
+            <h2 id="queue-heading">Rip queue</h2>
           </div>
-          <span class="section-note">Staged first. Published only when clean.</span>
+          <span id="queue-note" class="section-note">Completed rips save automatically to your destination.</span>
         </div>
         <div id="queue" class="queue" aria-live="polite"></div>
       </section>
@@ -110,14 +105,13 @@
       <section class="section activity-section" aria-labelledby="activity-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">ACTIVITY WIRE</p>
-            <h2 id="activity-heading">Live activity</h2>
+            <h2 id="activity-heading">Recent activity</h2>
           </div>
-          <span id="activity-note" class="section-note">Waiting for job telemetry…</span>
+          <span id="activity-note" class="section-note">Waiting for activity…</span>
         </div>
         <div class="activity-panel">
           <ol id="activity-log" class="activity-log" aria-live="polite" aria-relevant="additions">
-            <li class="activity-empty">No job activity yet.</li>
+            <li class="activity-empty">No activity yet.</li>
           </ol>
         </div>
       </section>
@@ -125,7 +119,6 @@
       <section class="section history-section" aria-labelledby="history-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">THE LEDGER</p>
             <h2 id="history-heading">Rip history</h2>
           </div>
           <span class="section-note">Last 50 jobs</span>
@@ -149,21 +142,54 @@
     </main>
 
     <footer>
-      <span>DISC GOBLIN / MAKE IT MKV. KEEP IT CLEAN.</span>
-      <span id="footer-library">Library path loading…</span>
+      <span>OpenRipper · Self-hosted · MIT licensed</span>
+      <span id="footer-library">Loading library path…</span>
     </footer>
+
+    <dialog id="settings-dialog" aria-labelledby="settings-title">
+      <form id="settings-form">
+        <div class="dialog-head">
+          <h2 id="settings-title">Ripping settings</h2>
+          <button class="icon-button" type="button" id="settings-close" aria-label="Close settings">×</button>
+        </div>
+        <p class="dialog-copy">Choose where new rips go. Settings are saved on this server and apply to the next disc.</p>
+        <label class="field">
+          <span>Destination folder</span>
+          <input id="settings-destination" required autocomplete="off" spellcheck="false" aria-describedby="destination-help" />
+        </label>
+        <p id="destination-help" class="field-help">Use an absolute path on the ripper host. In Docker, use a mounted container path such as /media/library.</p>
+        <label class="field">
+          <span>Output folders</span>
+          <select id="settings-output">
+            <option value="disc">Disc folders — save automatically</option>
+            <option value="library">Media library — confirm uncertain names</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Titles to rip</span>
+          <select id="settings-selection">
+            <option value="smart">Smart — main movie or episode titles</option>
+            <option value="main_feature">Main feature — longest title</option>
+            <option value="all">All titles meeting the minimum length</option>
+          </select>
+        </label>
+        <label class="check-field"><input id="settings-auto" type="checkbox" /> Start ripping when a disc is inserted</label>
+        <label class="check-field"><input id="settings-eject" type="checkbox" /> Eject the disc after a successful rip</label>
+        <p id="settings-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button id="settings-save" class="button button-primary" type="submit">Save settings</button></div>
+      </form>
+    </dialog>
 
     <dialog id="job-dialog" class="job-dialog">
       <div class="job-dialog-shell">
         <div class="dialog-head">
           <div>
-            <p class="eyebrow">JOB INSPECTOR</p>
-            <h2 id="job-dialog-title">Ingest details</h2>
+            <h2 id="job-dialog-title">Job details</h2>
           </div>
           <button class="icon-button" data-action="close-job" aria-label="Close job details">×</button>
         </div>
         <div id="job-dialog-body" class="job-dialog-body">
-          <p class="dialog-copy">Loading job telemetry…</p>
+          <p class="dialog-copy">Loading job…</p>
         </div>
       </div>
     </dialog>
@@ -172,14 +198,13 @@
       <form id="review-form" method="dialog">
         <div class="dialog-head">
           <div>
-            <p class="eyebrow">IDENTITY CHECK</p>
             <h2>Name this rip</h2>
           </div>
           <button class="icon-button" value="cancel" aria-label="Close dialog">×</button>
         </div>
         <p class="dialog-copy">
-          The files are already safe in staging. Confirm this once and Disc Goblin
-          will publish them into the exact layout your media server expects.
+          The rip is saved in staging. Confirm the title and OpenRipper will move it
+          into your library with the folder and file names your media server expects.
         </p>
         <input id="review-job-id" type="hidden" />
         <div class="type-switch" role="radiogroup" aria-label="Media type">
@@ -231,9 +256,9 @@
         </fieldset>
         <div id="review-error" class="form-error" role="alert"></div>
         <div class="dialog-actions">
-          <button class="button button-quiet" value="cancel">Keep staged</button>
+          <button class="button button-quiet" value="cancel">Not yet</button>
           <button id="publish-button" class="button button-primary" type="submit">
-            Confirm &amp; publish
+            Publish to library
           </button>
         </div>
       </form>

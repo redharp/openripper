@@ -44,15 +44,10 @@ class Drive(Base):
     status_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     discovery_source: Mapped[str] = mapped_column(String(32), nullable=False, default="makemkv")
     online: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    firmware_platform: Mapped[str] = mapped_column(String(80), nullable=False, default="")
     firmware_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
-    firmware_date: Mapped[str] = mapped_column(String(80), nullable=False, default="")
-    firmware_type: Mapped[str] = mapped_column(String(160), nullable=False, default="")
     libredrive_status: Mapped[str] = mapped_column(String(80), nullable=False, default="")
     uhd_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
     firmware_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    flash_candidate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    flash_profile: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -193,15 +188,10 @@ class Database:
                 "status_text",
                 "discovery_source",
                 "online",
-                "firmware_platform",
                 "firmware_version",
-                "firmware_date",
-                "firmware_type",
                 "libredrive_status",
                 "uhd_status",
                 "firmware_message",
-                "flash_candidate",
-                "flash_profile",
             ):
                 if field in drive:
                     setattr(row, field, drive[field])
@@ -223,15 +213,10 @@ class Database:
         allowed = {
             "state",
             "status_text",
-            "firmware_platform",
             "firmware_version",
-            "firmware_date",
-            "firmware_type",
             "libredrive_status",
             "uhd_status",
             "firmware_message",
-            "flash_candidate",
-            "flash_profile",
         }
         with Session(self.engine) as session, session.begin():
             drive = session.get(Drive, drive_id)

@@ -6,13 +6,13 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from disc_goblin.db import Base
+from openripper.db import Base
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-database_url = os.getenv("DISC_GOBLIN_DATABASE_URL")
+database_url = os.getenv("OPENRIPPER_DATABASE_URL") or os.getenv("DISC_GOBLIN_DATABASE_URL")
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 

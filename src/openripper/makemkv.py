@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .firmware import FirmwareInfo, FlashProfile, parse_firmware_info
+from .compatibility import CompatibilityInfo, parse_compatibility_info
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 
@@ -92,16 +92,7 @@ class RipperBackend(Protocol):
 
     async def eject(self, device: str) -> None: ...
 
-    async def firmware_info(self, device: str) -> FirmwareInfo: ...
-
-    async def flash_firmware(
-        self,
-        device: str,
-        *,
-        sdf_path: Path,
-        image_path: Path,
-        profile: FlashProfile,
-    ) -> str: ...
+    async def compatibility_info(self, device: str) -> CompatibilityInfo: ...
 
 
 def _csv_fields(line: str) -> list[str]:
@@ -296,7 +287,18 @@ class MakeMKVBackend:
             f"dev:{device}",
             accept_successful_title_scan=True,
         )
-        return parse_titles(output)
+        titles = parse_titles(output)
+        if not titles:
+            messages = [line for line in output.splitlines() if line.startswith("MSG:")]
+            if any(line.startswith("MSG:5053,") for line in messages):
+                raise MakeMKVError(
+                    "MakeMKV activation required. Open MakeMKV on this host and activate "
+                    "your license or start its evaluation, then retry this job."
+                )
+            raise MakeMKVError(
+                makemkv_failure(messages, "MakeMKV found no usable titles on the disc")
+            )
+        return titles
 
     async def rip_title(
         self,
@@ -348,11 +350,21 @@ class MakeMKVBackend:
         return max(created, key=lambda path: path.stat().st_mtime)
 
     async def eject(self, device: str) -> None:
-        if not device or os.name == "nt":
+        if not device:
             return
+        if os.name == "nt":
+            if not re.fullmatch(r"[A-Za-z]:", device):
+                raise MakeMKVError(f"Unable to open the tray for {device}")
+            # Same as Explorer's right-click > Eject on the drive letter.
+            command = (
+                "(New-Object -ComObject Shell.Application).Namespace(17)"
+                f".ParseName('{device.upper()}').InvokeVerb('Eject')"
+            )
+            arguments = ("powershell", "-NoProfile", "-NonInteractive", "-Command", command)
+        else:
+            arguments = ("eject", device)
         process = await asyncio.create_subprocess_exec(
-            "eject",
-            device,
+            *arguments,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -360,9 +372,10 @@ class MakeMKVBackend:
         if return_code:
             raise MakeMKVError(f"Unable to open the tray for {device}")
 
-    async def firmware_info(self, device: str) -> FirmwareInfo:
+    async def compatibility_info(self, device: str) -> CompatibilityInfo:
         arguments = ["f"]
-        if self.sdf_path:
+        # Windows MakeMKV locates its own SDF; only pass one that exists.
+        if self.sdf_path and self.sdf_path.is_file():
             arguments.extend(["-f", str(self.sdf_path)])
         arguments.extend(["-d", device, "--info"])
         output = await self._capture(*arguments)
@@ -374,59 +387,15 @@ class MakeMKVBackend:
             except OSError:
                 return ""
 
-        return parse_firmware_info(
+        return parse_compatibility_info(
             output,
             manufacturer=read_identity("vendor"),
             product=read_identity("model"),
             revision=read_identity("rev"),
         )
 
-    async def flash_firmware(
-        self,
-        device: str,
-        *,
-        sdf_path: Path,
-        image_path: Path,
-        profile: FlashProfile,
-    ) -> str:
-        arguments = [
-            "f",
-            "-d",
-            device,
-            "-f",
-            str(sdf_path),
-            "rawflash",
-            profile.flash_mode,
-        ]
-        if profile.encrypted:
-            arguments.append("enc")
-        arguments.extend(["-i", str(image_path)])
-        try:
-            process = await asyncio.create_subprocess_exec(
-                self.binary,
-                *arguments,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                **process_group_options(),
-            )
-        except FileNotFoundError as exc:
-            raise MakeMKVError(f"{self.binary} was not found") from exc
-        try:
-            stdout, _ = await process.communicate(b"yes\n")
-        except asyncio.CancelledError:
-            await stop_process(process)
-            raise
-        output = stdout.decode(errors="replace")
-        if process.returncode or "Done successfully" not in output:
-            raise MakeMKVError("\n".join(output.splitlines()[-20:]))
-        return output
-
 
 class SimulationBackend:
-    def __init__(self):
-        self.started_at = asyncio.get_running_loop().time()
-
     async def list_drives(self) -> list[DriveInfo]:
         return [
             DriveInfo(
@@ -484,50 +453,34 @@ class SimulationBackend:
             await asyncio.sleep(0.25)
             await progress(step / 10, f"Demo rip · title {title_index}")
         output = destination / f"demo_t{title_index:02d}.mkv"
-        output.write_bytes(b"DISC GOBLIN SIMULATION\n")
+        output.write_bytes(b"OPENRIPPER SIMULATION\n")
         return output
 
     async def eject(self, device: str) -> None:
         await asyncio.sleep(0.1)
 
-    async def firmware_info(self, device: str) -> FirmwareInfo:
+    async def compatibility_info(self, device: str) -> CompatibilityInfo:
         await asyncio.sleep(0.1)
         if device == "/dev/sr0":
-            return FirmwareInfo(
+            return CompatibilityInfo(
                 manufacturer="PIONEER",
                 product="BD-RW BDR-212UBK",
                 revision="1.02",
-                firmware_date="2023-02-14",
-                platform="RS8E21",
-                firmware_type="Original (unpatched)",
                 firmware_version="1.02",
                 libredrive_status="Enabled",
                 bd_raw_data_read=True,
-                bd_raw_metadata_read=True,
-                unrestricted_read_speed=True,
-                uhd_status="ready",
-                message="LibreDrive reports raw BD access on a known UHD-capable model",
+                status="ready",
+                message="Rips 4K UHD, Blu-ray and DVD",
             )
-        return FirmwareInfo(
+        return CompatibilityInfo(
             manufacturer="HL-DT-ST",
-            product="BD-RE WH16NS40",
+            product="BD-RE WH16NS60",
             revision="1.05",
-            firmware_date="2120-05-06 11:42",
-            platform="MT1959",
-            firmware_type="Original (unpatched)",
             firmware_version="1.05",
             libredrive_status="Possible, not yet enabled",
-            uhd_status="flash_possible",
-            message="Known UHD-capable hardware may need an approved firmware",
+            status="needs_firmware",
+            message=(
+                "UHD-capable drive, but LibreDrive isn't enabled on this firmware. "
+                "Blu-ray and DVD rip normally."
+            ),
         )
-
-    async def flash_firmware(
-        self,
-        device: str,
-        *,
-        sdf_path: Path,
-        image_path: Path,
-        profile: FlashProfile,
-    ) -> str:
-        await asyncio.sleep(0.8)
-        return "Done successfully"

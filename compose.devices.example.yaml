@@ -1,8 +1,12 @@
 # Optional least-privilege override. Device pairs are host-specific; discover
 # them with `lsscsi -g` and list every /dev/sr* + matching /dev/sg* pair.
 services:
-  disc-goblin:
+  openripper:
     privileged: false
+    volumes: !override
+      - /run/udev:/run/udev:ro
+      - ./config:/config
+      - ${OPENRIPPER_LIBRARY_HOST_PATH:-./library}:/media/library
     devices:
       - /dev/sr0:/dev/sr0
       - /dev/sg1:/dev/sg1

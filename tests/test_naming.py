@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from disc_goblin.naming import (
+from openripper.naming import (
     clean_component,
     movie_destination,
     title_from_disc_label,

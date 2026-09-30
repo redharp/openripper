@@ -11,7 +11,6 @@ from typing import Any
 from .config import Settings
 from .db import Database, now_iso
 from .discovery import optical_hotplug_events, optical_media_labels
-from .firmware import FirmwareInfo, FirmwareManifest
 from .makemkv import (
     DriveInfo,
     MakeMKVError,
@@ -21,7 +20,7 @@ from .makemkv import (
     fingerprint_disc,
 )
 from .metadata import MetadataResolver
-from .naming import movie_destination, tv_destination
+from .naming import clean_component, movie_destination, tv_destination
 
 ACTIVE_STATUSES = {"scanning", "queued", "ripping", "publishing"}
 TERMINAL_STATUSES = {"complete", "failed", "cancelled"}
@@ -46,15 +45,12 @@ class RipperService:
         self.database = database
         self.backend = backend
         self.metadata = MetadataResolver(settings.tmdb_token)
-        self.firmware_manifest = FirmwareManifest(
-            settings.firmware_manifest, settings.firmware_root
-        )
         self._watcher: asyncio.Task[None] | None = None
         self._udev_watcher: asyncio.Task[None] | None = None
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._seen_drives: set[str] = set()
-        self._firmware_audited: set[str] = set()
-        self._auto_flash_attempted: set[str] = set()
+        self._media_labels: dict[str, str] = {}
+        self._compatibility_checked: set[str] = set()
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_rips)
         self._poll_lock = asyncio.Lock()
@@ -88,8 +84,9 @@ class RipperService:
                 level="warning",
             )
         self.settings.library_root.mkdir(parents=True, exist_ok=True)
-        self.settings.movie_root.mkdir(parents=True, exist_ok=True)
-        self.settings.tv_root.mkdir(parents=True, exist_ok=True)
+        if self.settings.output_mode == "library":
+            self.settings.movie_root.mkdir(parents=True, exist_ok=True)
+            self.settings.tv_root.mkdir(parents=True, exist_ok=True)
         self.settings.staging_root.mkdir(parents=True, exist_ok=True)
         self._watcher = asyncio.create_task(self._watch_loop(), name="disc-watcher")
         if self.settings.udev_discovery:
@@ -129,10 +126,10 @@ class RipperService:
     async def poll_once(self) -> None:
         async with self._poll_lock:
             drives = await self.backend.list_drives()
+            # MakeMKV's --noscan listing omits loaded discs, so ask the OS. Windows
+            # has no udev, so its label lookup always runs.
             media_labels = (
-                await asyncio.to_thread(optical_media_labels)
-                if self.settings.udev_discovery
-                else {}
+                await asyncio.to_thread(optical_media_labels) if not self.settings.simulate else {}
             )
             for drive in drives:
                 if not drive.disc_name and media_labels.get(drive.device):
@@ -141,7 +138,7 @@ class RipperService:
                     drive.status_text = "Disc ready"
             present_ids = {drive.id for drive in drives}
             self._seen_drives.intersection_update(present_ids)
-            self._firmware_audited.intersection_update(present_ids)
+            self._compatibility_checked.intersection_update(present_ids)
             self.database.mark_missing_drives_offline(present_ids)
             for drive in drives:
                 active_job = self.database.fetchone(
@@ -161,19 +158,28 @@ class RipperService:
                 )
                 data["online"] = True
                 self.database.upsert_drive(data)
-                if self.settings.firmware_audit and drive.id not in self._firmware_audited:
-                    await self.audit_drive(drive.id, drive=drive)
+                if active_job:
+                    continue
+                if self._media_labels.get(drive.id) != drive.disc_name:
+                    self._seen_drives.discard(drive.id)
+                self._media_labels[drive.id] = drive.disc_name
+                if drive.disc_name and self.settings.auto_rip and drive.id not in self._seen_drives:
+                    self.queue_drive(drive)
+                    continue
+                if (
+                    self.settings.compatibility_check
+                    and drive.id not in self._compatibility_checked
+                ):
+                    await self.check_compatibility(drive.id, drive=drive)
                 if not drive.disc_name:
                     self._seen_drives.discard(drive.id)
-                    await self._maybe_auto_flash(drive)
                     continue
-                if drive.id in self._seen_drives:
-                    continue
-                self._seen_drives.add(drive.id)
-                self.queue_drive(drive)
             await self.broadcast()
 
-    async def audit_drive(self, drive_id: str, *, drive: DriveInfo | None = None) -> dict[str, Any]:
+    async def check_compatibility(
+        self, drive_id: str, *, drive: DriveInfo | None = None
+    ) -> dict[str, Any]:
+        """Read-only MakeMKV drive info, summarized as what the drive can rip."""
         if drive is None:
             row = self.database.fetchone("SELECT * FROM drives WHERE id=?", (drive_id,))
             if not row:
@@ -188,148 +194,32 @@ class RipperService:
                 status_text=row["status_text"],
             )
         try:
-            info = await self.backend.firmware_info(drive.device)
-            profile = self.firmware_manifest.match(info)
-            flash_candidate = False
-            profile_id = ""
-            if profile:
-                profile_id = profile.id
-                try:
-                    self.firmware_manifest.validate_image(profile)
-                    flash_candidate = True
-                except (FileNotFoundError, ValueError) as exc:
-                    info.message += f". Profile {profile.id} is present but not ready: {exc}"
+            info = await self.backend.compatibility_info(drive.device)
             self.database.update_drive(
                 drive_id,
-                firmware_platform=info.platform,
                 firmware_version=info.firmware_version or info.revision,
-                firmware_date=info.firmware_date,
-                firmware_type=info.firmware_type,
                 libredrive_status=info.libredrive_status,
-                uhd_status=info.uhd_status,
+                uhd_status=info.status,
                 firmware_message=info.message,
-                flash_candidate=flash_candidate,
-                flash_profile=profile_id,
             )
-            self._firmware_audited.add(drive_id)
-            self.database.add_event(
-                f"Firmware audit: {info.uhd_status.replace('_', ' ')}",
-                details={
-                    "drive_id": drive_id,
-                    "platform": info.platform,
-                    "version": info.firmware_version or info.revision,
-                    "profile": profile_id,
-                },
-            )
+            self._compatibility_checked.add(drive_id)
         except Exception as exc:
             self.database.update_drive(
                 drive_id,
-                uhd_status="audit_failed",
-                firmware_message=str(exc),
-                flash_candidate=False,
+                uhd_status="check_failed",
+                firmware_message=f"Couldn't read drive details: {exc}",
             )
             self.database.add_event(
-                f"Firmware audit failed: {exc}",
+                f"Compatibility check failed: {exc}",
                 level="error",
                 details={"drive_id": drive_id},
             )
         await self.broadcast()
         return self.database.fetchone("SELECT * FROM drives WHERE id=?", (drive_id,)) or {}
 
-    async def _maybe_auto_flash(self, drive: DriveInfo) -> None:
-        if not self.settings.auto_flash or drive.id in self._auto_flash_attempted:
-            return
-        row = self.database.fetchone("SELECT * FROM drives WHERE id=?", (drive.id,))
-        if not row or not row["flash_candidate"] or not row["flash_profile"]:
-            return
-        info = await self.backend.firmware_info(drive.device)
-        profile = self.firmware_manifest.match(info)
-        if not profile or not profile.auto_approved:
-            return
-        self._auto_flash_attempted.add(drive.id)
-        await self.flash_drive(drive.id, automatic=True)
-
-    async def flash_drive(self, drive_id: str, *, automatic: bool = False) -> dict[str, Any]:
-        row = self.database.fetchone("SELECT * FROM drives WHERE id=?", (drive_id,))
-        if not row:
-            raise KeyError(drive_id)
-        if row["disc_name"] or row["state"] not in {"empty", "ready"}:
-            raise ValueError("Firmware flashing requires an idle drive with an empty tray")
-        active = self.database.fetchone(
-            """
-            SELECT id FROM jobs
-            WHERE drive_id=? AND status IN ('scanning','queued','ripping','publishing')
-            LIMIT 1
-            """,
-            (drive_id,),
-        )
-        if active:
-            raise ValueError("The drive has an active ingest job")
-        info: FirmwareInfo = await self.backend.firmware_info(row["device"])
-        profile = self.firmware_manifest.match(info)
-        if not profile:
-            raise ValueError("No exact allowlisted firmware profile matches this drive")
-        if automatic and not profile.auto_approved:
-            raise ValueError("The matching firmware profile is not approved for auto-flash")
-        image = self.firmware_manifest.validate_image(profile)
-        if not self.settings.sdf_path.is_file():
-            raise FileNotFoundError(f"MakeMKV SDF is missing: {self.settings.sdf_path}")
-        self.database.update_drive(
-            drive_id,
-            state="flashing",
-            status_text=f"Flashing profile {profile.id}",
-        )
-        self.database.add_event(
-            "Firmware flash started",
-            level="warning",
-            details={
-                "drive_id": drive_id,
-                "profile": profile.id,
-                "automatic": automatic,
-                "image_sha256": profile.sha256,
-            },
-        )
-        await self.broadcast()
-        try:
-            await self.backend.flash_firmware(
-                row["device"],
-                sdf_path=self.settings.sdf_path,
-                image_path=image,
-                profile=profile,
-            )
-            after = await self.backend.firmware_info(row["device"])
-            actual_version = after.firmware_version or after.revision
-            if profile.target_version and actual_version != profile.target_version:
-                raise ValueError(
-                    "Flash command completed but post-flash version "
-                    f"{actual_version!r} did not match {profile.target_version!r}"
-                )
-            self._firmware_audited.discard(drive_id)
-            self.database.add_event(
-                "Firmware flash verified",
-                details={
-                    "drive_id": drive_id,
-                    "profile": profile.id,
-                    "version": actual_version,
-                },
-            )
-            return await self.audit_drive(drive_id)
-        except Exception as exc:
-            self.database.update_drive(
-                drive_id,
-                state="firmware_error",
-                status_text="Firmware flash needs attention",
-                firmware_message=str(exc),
-            )
-            self.database.add_event(
-                f"Firmware flash failed: {exc}",
-                level="error",
-                details={"drive_id": drive_id, "profile": profile.id},
-            )
-            await self.broadcast()
-            raise
-
     def queue_drive(self, drive: DriveInfo) -> str:
+        self._seen_drives.add(drive.id)
+        self._media_labels[drive.id] = drive.disc_name
         active = self.database.fetchone(
             """
             SELECT id FROM jobs
@@ -362,7 +252,7 @@ class RipperService:
         return job_id
 
     async def _run_job(self, job_id: str, drive: DriveInfo) -> None:
-        async with self._drive_lock(drive.id):
+        async with self._drive_lock(drive.id), self._semaphore:
             await self._process_job(job_id, drive)
 
     async def _process_job(self, job_id: str, drive: DriveInfo) -> None:
@@ -380,7 +270,7 @@ class RipperService:
                 (fingerprint, job_id),
             )
             self.database.update_job(job_id, fingerprint=fingerprint)
-            if duplicate:
+            if duplicate and self.settings.output_mode == "library":
                 self.database.update_job(
                     job_id,
                     status="needs_review",
@@ -403,14 +293,17 @@ class RipperService:
                 raise MakeMKVError("No titles passed the configured selection rules")
             self.database.replace_titles(job_id, [title.to_dict() for title in titles])
 
-            match = await self.metadata.resolve(drive.disc_name)
+            resolver = (
+                self.metadata if self.settings.output_mode == "library" else MetadataResolver()
+            )
+            match = await resolver.resolve(drive.disc_name)
             self.database.update_job(
                 job_id,
                 media_type=match.media_type,
                 title=match.title,
                 year=match.year,
                 metadata_confidence=match.confidence,
-                status="queued" if self.settings.auto_rip else "needs_review",
+                status="queued",
             )
             self.database.add_event(
                 f"Selected {len(selected)} title{'s' if len(selected) != 1 else ''}",
@@ -421,10 +314,7 @@ class RipperService:
                 },
             )
             await self.broadcast()
-            if not self.settings.auto_rip:
-                return
-            async with self._semaphore:
-                await self._rip(job_id, drive, selected)
+            await self._rip(job_id, drive, selected)
         except asyncio.CancelledError:
             self.database.update_job(
                 job_id,
@@ -446,7 +336,8 @@ class RipperService:
             await self.broadcast()
 
     async def _rip(self, job_id: str, drive: DriveInfo, selected_titles: list[TitleInfo]) -> None:
-        stage = self.settings.staging_root / job_id
+        current = self.database.job_detail(job_id)
+        stage = Path(current["stage_path"]) if current else self.settings.staging_root / job_id
         stage.mkdir(parents=True, exist_ok=True)
         self.database.update_job(
             job_id,
@@ -497,17 +388,15 @@ class RipperService:
                 details={"file": output.name},
             )
         self.database.update_job(job_id, progress=1)
-        if self.settings.eject_on_success:
-            await self.backend.eject(drive.device)
-            self.database.add_event("Drive ejected", job_id=job_id)
-
         job = self.database.job_detail(job_id)
         assert job
         can_publish = (
             bool(job["title"])
             and job["metadata_confidence"] >= self.settings.auto_publish_confidence
         )
-        if can_publish:
+        if self.settings.output_mode == "disc":
+            await self.complete_disc(job_id)
+        elif can_publish:
             await self.publish_job(job_id)
         else:
             self.database.update_job(job_id, status="needs_review")
@@ -517,6 +406,50 @@ class RipperService:
                 level="warning",
             )
             await self.broadcast()
+
+        if self.settings.eject_on_success:
+            try:
+                await self.backend.eject(drive.device)
+                self.database.add_event("Drive ejected", job_id=job_id)
+            except Exception as exc:
+                self.database.add_event(
+                    f"Rip saved, but the tray could not open: {exc}",
+                    job_id=job_id,
+                    level="warning",
+                )
+            await self.broadcast()
+
+    async def complete_disc(self, job_id: str) -> None:
+        """Finish all titles together; a unique folder never replaces another rip."""
+        job = self.database.job_detail(job_id)
+        assert job
+        stage = Path(job["stage_path"])
+        label = clean_component(job["disc_name"], "Disc")[:100]
+        destination = self.settings.library_root / f"{label} - {job_id}"
+        if destination.exists():
+            raise FileExistsError(f"Refusing to overwrite {destination}")
+        self.database.update_job(job_id, status="publishing")
+        await self.broadcast()
+        # Staging is under the configured destination, so this is one filesystem rename.
+        stage.rename(destination)
+        for title in job["titles"]:
+            if title["ripped_path"]:
+                self.database.execute(
+                    "UPDATE titles SET ripped_path=? WHERE id=?",
+                    (str(destination / Path(title["ripped_path"]).name), title["id"]),
+                )
+        self.database.update_job(
+            job_id,
+            status="complete",
+            final_path=str(destination),
+            completed_at=now_iso(),
+            progress=1,
+            error="",
+        )
+        self.database.add_event(
+            "Rip saved to destination", job_id=job_id, details={"path": str(destination)}
+        )
+        await self.broadcast()
 
     async def publish_job(self, job_id: str) -> dict[str, Any]:
         job = self.database.job_detail(job_id)
@@ -647,7 +580,9 @@ class RipperService:
         if active:
             raise ValueError("The drive already has an active ingest job")
         drive_row = self.database.fetchone("SELECT * FROM drives WHERE id=?", (job["drive_id"],))
-        if not drive_row or not drive_row["disc_name"]:
+        if not drive_row or not drive_row["disc_name"] or (
+            drive_row["disc_name"] != job["disc_name"]
+        ):
             raise ValueError("Insert the original disc before retrying this job")
         drive = DriveInfo(
             id=drive_row["id"],
@@ -672,17 +607,15 @@ class RipperService:
             )
             for row in selected_rows
         ]
-        if not selected:
-            raise ValueError("This job has no selected titles to retry")
         self.database.update_job(
             job_id,
-            status="queued",
+            status="queued" if selected else "scanning",
             progress=0,
             error="",
             completed_at=None,
         )
         task = asyncio.create_task(
-            self._run_retry(job_id, drive, selected),
+            self._run_retry(job_id, drive, selected) if selected else self._run_job(job_id, drive),
             name=f"retry-{job_id}",
         )
         self._track_task(job_id, task)

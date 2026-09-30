@@ -13,6 +13,7 @@ const appState = {
   detailJobId: null,
   detailRequest: 0,
   destroyed: false,
+  preferences: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -26,6 +27,14 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+
+const COMPATIBILITY_LABELS = {
+  ready: "4K UHD ready",
+  needs_firmware: "UHD needs firmware",
+  standard: "Blu-ray & DVD",
+  check_failed: "Check failed",
+  unknown: "Checking…",
+};
 
 function humanStatus(status) {
   return String(status || "unknown").replaceAll("_", " ");
@@ -52,7 +61,7 @@ function formatBytes(bytes) {
 
 function relativeTime(value) {
   if (!value) return "—";
-  const date = new Date(value);
+  const date = utcDate(value);
   const seconds = Math.round((date.getTime() - Date.now()) / 1000);
   const formatter = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
   const ranges = [
@@ -70,11 +79,16 @@ function relativeTime(value) {
 
 function elapsedTime(value) {
   if (!value) return "Waiting to start";
-  const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000));
+  const seconds = Math.max(0, Math.round((Date.now() - utcDate(value).getTime()) / 1000));
   if (seconds < 60) return `${seconds}s elapsed`;
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   return hours ? `${hours}h ${minutes}m elapsed` : `${minutes}m elapsed`;
+}
+
+function utcDate(value) {
+  const text = String(value).replace(" ", "T");
+  return new Date(/[zZ]$|[+-]\d{2}:\d{2}$/.test(text) ? text : `${text}Z`);
 }
 
 function titleFor(job) {
@@ -84,11 +98,11 @@ function titleFor(job) {
 
 function statusCopy(job, progress) {
   const messages = {
-    scanning: "Reading disc structure and titles",
-    queued: "Waiting for an available rip slot",
-    ripping: progress ? `Copying selected titles · ${progress}%` : "MakeMKV is starting the rip",
-    publishing: "Moving verified files into the library",
-    needs_review: "Rip secured in staging",
+    scanning: "Reading the disc",
+    queued: "Waiting for a free drive slot",
+    ripping: progress ? `Ripping · ${progress}%` : "Starting rip",
+    publishing: "Moving files into your library",
+    needs_review: "Ripped. Confirm the title to publish.",
   };
   return messages[job.status] || humanStatus(job.status);
 }
@@ -113,7 +127,7 @@ function renderMetrics(data) {
   $("#metric-review").textContent = reviewing;
   $("#metric-drives-note").textContent = data.drives.length
     ? `${data.drives.filter((drive) => drive.disc_name).length} with media inserted`
-    : "No optical hardware found";
+    : "No drives found";
 }
 
 function renderDrives(data) {
@@ -121,11 +135,11 @@ function renderDrives(data) {
   const activeByDrive = new Map(data.active_jobs.map((job) => [job.drive_id, job]));
   $("#drive-summary").textContent = data.drives.length
     ? `${data.drives.length} drive${data.drives.length === 1 ? "" : "s"} responding`
-    : "No drives are visible to MakeMKV";
+    : "MakeMKV can’t see any drives";
   if (!data.drives.length) {
     grid.innerHTML = `
       <div class="empty-state">
-        <div><strong>No optical drives yet</strong><span>Expose /dev/sr* and /dev/sg* to the container, then scan again.</span></div>
+        <div><strong>Connect a DVD or Blu-ray drive</strong><span>Make sure MakeMKV can see the drive, then choose Scan drives. Docker hosts also need the optical devices passed through.</span></div>
       </div>`;
     return;
   }
@@ -135,31 +149,26 @@ function renderDrives(data) {
       const active = job && ["scanning", "queued", "ripping", "publishing"].includes(job.status);
       const state = active ? job.status : drive.disc_name ? "ready" : "empty";
       const discCopy = drive.disc_name
-        ? `<p class="disc-label"><small>MEDIA LOADED</small>${escapeHtml(drive.disc_name)}</p>`
-        : `<p class="disc-label"><small>TRAY STATUS</small>Ready for a disc</p>`;
-      const uhdStatus = drive.uhd_status || "unknown";
-      const firmwareCopy = drive.firmware_version
-        ? `${drive.firmware_platform || "platform ?"} · FW ${drive.firmware_version}`
-        : "Firmware not audited";
+        ? `<p class="disc-label"><small>DISC</small>${escapeHtml(drive.disc_name)}</p>`
+        : `<p class="disc-label"><small>TRAY</small>Empty</p>`;
+      const compatibility = drive.uhd_status in COMPATIBILITY_LABELS ? drive.uhd_status : "unknown";
+      const deviceCopy = drive.firmware_version
+        ? `${drive.device || `disc:${drive.disc_index}`} · FW ${drive.firmware_version}`
+        : drive.device || `disc:${drive.disc_index}`;
       return `
         <article class="drive-card ${active ? "active" : ""}">
           <div class="drive-top">
             <span class="drive-number">DRIVE / ${String(drive.disc_index + 1).padStart(2, "0")}</span>
             <div class="drive-badges">
-              <span class="firmware-pill ${escapeHtml(uhdStatus)}">UHD ${escapeHtml(humanStatus(uhdStatus))}</span>
+              <span class="compat-pill ${escapeHtml(compatibility)}">${escapeHtml(COMPATIBILITY_LABELS[compatibility])}</span>
               <span class="state-pill ${escapeHtml(state)}">${escapeHtml(humanStatus(state))}</span>
             </div>
           </div>
           <h3>${escapeHtml(drive.name)}</h3>
-          <span class="device">${escapeHtml(drive.device || `disc:${drive.disc_index}`)} · ${escapeHtml(firmwareCopy)}</span>
+          <span class="device">${escapeHtml(deviceCopy)}</span>
+          ${drive.firmware_message ? `<p class="compat-note">${escapeHtml(drive.firmware_message)}</p>` : ""}
           ${discCopy}
           <div class="drive-actions">
-            <button class="mini-button" data-action="firmware-audit" data-drive="${escapeHtml(drive.id)}">Audit FW</button>
-            ${
-              drive.flash_candidate && !drive.disc_name && !active
-                ? `<button class="mini-button flash-button" data-action="firmware-flash" data-drive="${escapeHtml(drive.id)}">Flash UHD FW</button>`
-                : ""
-            }
             ${
               drive.disc_name && !active
                 ? `<button class="mini-button" data-action="rip" data-drive="${escapeHtml(drive.id)}">Rip now</button>`
@@ -167,7 +176,7 @@ function renderDrives(data) {
             }
             ${
               !active
-                ? `<button class="mini-button" data-action="eject" data-drive="${escapeHtml(drive.id)}">Open tray</button>`
+                ? `<button class="mini-button" data-action="eject" data-drive="${escapeHtml(drive.id)}">Eject</button>`
                 : ""
             }
           </div>
@@ -181,7 +190,7 @@ function renderQueue(data) {
   if (!data.active_jobs.length) {
     queue.innerHTML = `
       <div class="empty-state">
-        <div><strong>The goblin is idle</strong><span>Insert a Blu-ray. Ingest starts automatically.</span></div>
+        <div><strong>Ready for your next disc</strong><span>${appState.preferences?.auto_rip === false ? "Automatic ripping is paused. Use Rip now on a loaded drive." : "Insert a DVD or Blu-ray. Ripping starts automatically."}</span></div>
       </div>`;
     return;
   }
@@ -211,7 +220,7 @@ function renderQueue(data) {
             <button class="button button-quiet" data-action="job-detail" data-job="${escapeHtml(job.id)}">Details</button>
             ${
               review
-                ? `<button class="button button-primary" data-action="review" data-job="${escapeHtml(job.id)}">Name & publish</button>`
+                ? `<button class="button button-primary" data-action="review" data-job="${escapeHtml(job.id)}">Review &amp; publish</button>`
                 : `<button class="button button-danger" data-action="cancel" data-job="${escapeHtml(job.id)}">Cancel</button>`
             }
           </div>
@@ -231,13 +240,13 @@ function renderActivity() {
         jobTitle: titleFor(job),
       })),
     )
-    .sort((left, right) => new Date(right.created_at) - new Date(left.created_at))
+    .sort((left, right) => utcDate(right.created_at) - utcDate(left.created_at))
     .slice(0, 30);
   $("#activity-note").textContent = events.length
-    ? `${events.length} recent event${events.length === 1 ? "" : "s"} · click one for details`
-    : "No recorded job events yet";
+    ? `${events.length} recent event${events.length === 1 ? "" : "s"} · select one for details`
+    : "No activity yet";
   if (!events.length) {
-    list.innerHTML = `<li class="activity-empty">No recorded job activity yet. Running jobs will report here.</li>`;
+    list.innerHTML = `<li class="activity-empty">No activity yet. Jobs show up here as they run.</li>`;
     return;
   }
   list.innerHTML = events
@@ -300,7 +309,7 @@ function scheduleActivityHydration() {
 function renderHistory(data) {
   const body = $("#history-body");
   if (!data.history.length) {
-    body.innerHTML = `<tr><td colspan="6"><div class="empty-state"><div><strong>No history yet</strong><span>Your completed and failed jobs will land here.</span></div></div></td></tr>`;
+    body.innerHTML = `<tr><td colspan="6"><div class="empty-state"><div><strong>No history yet</strong><span>Finished and failed rips will show up here.</span></div></div></td></tr>`;
     return;
   }
   body.innerHTML = data.history
@@ -345,7 +354,8 @@ async function api(path, options = {}) {
     let message = `${response.status} ${response.statusText}`;
     try {
       const payload = await response.json();
-      message = payload.detail || message;
+      message = Array.isArray(payload.detail)
+        ? payload.detail.map((item) => item.msg).join("; ") : payload.detail || message;
     } catch {}
     throw new Error(message);
   }
@@ -372,11 +382,11 @@ function connect() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${protocol}//${location.host}/api/ws`);
   appState.socket = socket;
-  setConnection("syncing", "Syncing", "Opening the live dashboard channel");
+  setConnection("syncing", "Syncing", "Connecting…");
   socket.addEventListener("open", () => {
     if (generation !== appState.socketGeneration) return;
     appState.reconnectAttempts = 0;
-    setConnection("online", "Live", "Live updates connected");
+    setConnection("online", "Live", "Live");
   });
   socket.addEventListener("message", (event) => {
     if (generation !== appState.socketGeneration) return;
@@ -384,15 +394,15 @@ function connect() {
       render(JSON.parse(event.data));
       setConnection("online", "Live", `Last update ${new Date().toLocaleTimeString()}`);
     } catch {
-      setConnection("syncing", "Syncing", "Received an invalid live update; polling is active");
+      setConnection("syncing", "Syncing", "Live updates failed. Refreshing every few seconds instead.");
     }
   });
   socket.addEventListener("close", () => {
     if (generation !== appState.socketGeneration || appState.destroyed) return;
     appState.socket = null;
     appState.reconnectAttempts += 1;
-    setConnection("syncing", "Polling", "Live channel paused; dashboard polling is active");
-    refresh().catch(() => setConnection("offline", "Offline", "Dashboard is unreachable"));
+    setConnection("syncing", "Polling", "Live updates paused. Refreshing every few seconds instead.");
+    refresh().catch(() => setConnection("offline", "Offline", "Can’t reach OpenRipper"));
     const delay = Math.min(15000, 1200 * 2 ** Math.min(appState.reconnectAttempts, 4));
     appState.reconnectTimer = setTimeout(connect, delay);
   });
@@ -447,7 +457,7 @@ function renderJobDetail(job) {
                       </div>`,
                   )
                   .join("")
-              : `<p class="detail-empty">Disc titles are still being scanned.</p>`
+              : `<p class="detail-empty">Still reading the disc’s titles.</p>`
           }
         </div>
       </section>
@@ -465,7 +475,7 @@ function renderJobDetail(job) {
                       </div>`,
                   )
                   .join("")
-              : `<p class="detail-empty">Waiting for the first job event.</p>`
+              : `<p class="detail-empty">No activity yet.</p>`
           }
         </div>
       </section>
@@ -474,7 +484,7 @@ function renderJobDetail(job) {
     <div class="dialog-actions">
       ${
         job.status === "needs_review"
-          ? `<button class="button button-primary" data-action="review" data-job="${escapeHtml(job.id)}">Name & publish</button>`
+          ? `<button class="button button-primary" data-action="review" data-job="${escapeHtml(job.id)}">Review &amp; publish</button>`
           : ["scanning", "queued", "ripping", "publishing"].includes(job.status)
             ? `<button class="button button-danger" data-action="cancel" data-job="${escapeHtml(job.id)}">Cancel job</button>`
             : ""
@@ -486,8 +496,8 @@ function renderJobDetail(job) {
 async function openJobDetail(jobId) {
   appState.detailJobId = jobId;
   const request = ++appState.detailRequest;
-  $("#job-dialog-title").textContent = "Loading ingest…";
-  $("#job-dialog-body").innerHTML = `<p class="dialog-copy">Loading job telemetry…</p>`;
+  $("#job-dialog-title").textContent = "Loading…";
+  $("#job-dialog-body").innerHTML = `<p class="dialog-copy">Loading job…</p>`;
   const dialog = $("#job-dialog");
   if (!dialog.open) dialog.showModal();
   const job = await api(`/api/jobs/${jobId}`);
@@ -549,24 +559,7 @@ async function performAction(action, target) {
     toast("Retry queued.");
   } else if (action === "cancel") {
     await api(`/api/jobs/${target.dataset.job}/cancel`, { method: "POST", body: "{}" });
-    toast("Cancelling job.");
-  } else if (action === "firmware-audit") {
-    await api(`/api/drives/${target.dataset.drive}/firmware/audit`, {
-      method: "POST",
-      body: "{}",
-    });
-    toast("Firmware and LibreDrive audit complete.");
-  } else if (action === "firmware-flash") {
-    const driveId = target.dataset.drive;
-    const approved = window.confirm(
-      "Firmware flashing can permanently damage an incompatible drive. Continue only if the exact model, platform, image hash, and profile are trusted.",
-    );
-    if (!approved) return;
-    await api(`/api/drives/${driveId}/firmware/flash`, {
-      method: "POST",
-      body: JSON.stringify({ confirmation: `FLASH ${driveId}` }),
-    });
-    toast("Firmware flashed and post-flash identity verified.");
+    toast("Cancelling…");
   }
   await refresh();
 }
@@ -645,7 +638,7 @@ $("#review-form").addEventListener("submit", async (event) => {
       body: JSON.stringify(payload),
     });
     $("#review-dialog").close();
-    toast("Published with a clean library name.");
+    toast("Published to your library.");
     await refresh();
   } catch (error) {
     $("#review-error").textContent = error.message;
@@ -657,20 +650,24 @@ $("#review-form").addEventListener("submit", async (event) => {
 
 async function boot() {
   try {
-    const [health, overview] = await Promise.all([api("/healthz"), api("/api/overview")]);
+    const [health, overview, preferences] = await Promise.all([
+      api("/healthz"), api("/api/overview"), api("/api/settings"),
+    ]);
+    renderPreferences(preferences);
+    $("#simulation-notice").hidden = !health.simulation;
     $("#footer-library").textContent = health.simulation
       ? `SIMULATION / ${health.library_root}`
       : `LIBRARY / ${health.library_root}`;
     render(overview);
   } catch (error) {
-    toast(`Disc Goblin could not start: ${error.message}`, "error");
+    toast(`OpenRipper couldn’t load: ${error.message}`, "error");
   }
   connect();
   appState.pollTimer = setInterval(() => {
     if (document.visibilityState === "visible") {
       refresh().catch(() => {
         if (!appState.socket || appState.socket.readyState !== WebSocket.OPEN) {
-          setConnection("offline", "Offline", "Dashboard is unreachable");
+          setConnection("offline", "Offline", "Can’t reach OpenRipper");
         }
       });
     }
@@ -703,3 +700,65 @@ $("#job-dialog").addEventListener("close", () => {
 });
 
 boot();
+
+function renderPreferences(preferences) {
+  appState.preferences = preferences;
+  $("#destination-path").textContent = preferences.library_root;
+  $("#automation-status").textContent = preferences.auto_rip
+    ? "Automatic ripping is on" : "Automatic ripping is paused";
+  $("#automation-status").classList.toggle("paused", !preferences.auto_rip);
+  const copy = preferences.output_mode === "disc"
+    ? "One folder per disc. No naming confirmation needed."
+    : "Library mode: uncertain names wait for your confirmation.";
+  $("#output-description").textContent = copy;
+  $("#queue-note").textContent = copy;
+}
+
+$("#settings-button").addEventListener("click", async () => {
+  const button = $("#settings-button");
+  button.disabled = true;
+  try {
+    const preferences = await api("/api/settings");
+    $("#settings-destination").value = preferences.library_root;
+    $("#settings-auto").checked = preferences.auto_rip;
+    $("#settings-eject").checked = preferences.eject_on_success;
+    $("#settings-output").value = preferences.output_mode;
+    $("#settings-selection").value = preferences.rip_mode;
+    $("#settings-error").textContent = "";
+    $("#settings-dialog").showModal();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#settings-close").addEventListener("click", () => $("#settings-dialog").close());
+$("#settings-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("#settings-save");
+  button.disabled = true;
+  button.textContent = "Saving…";
+  $("#settings-error").textContent = "";
+  try {
+    const preferences = await api("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        library_root: $("#settings-destination").value.trim(),
+        auto_rip: $("#settings-auto").checked,
+        eject_on_success: $("#settings-eject").checked,
+        output_mode: $("#settings-output").value,
+        rip_mode: $("#settings-selection").value,
+      }),
+    });
+    renderPreferences(preferences);
+    $("#footer-library").textContent = `DESTINATION / ${preferences.library_root}`;
+    $("#settings-dialog").close();
+    toast("Settings saved. Ready for your next disc.");
+  } catch (error) {
+    $("#settings-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Save settings";
+  }
+});

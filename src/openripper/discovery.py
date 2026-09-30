@@ -13,10 +13,45 @@ def parse_blkid_label(output: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def optical_media_labels() -> dict[str, str]:
-    """Return loaded optical media labels keyed by /dev/sr* device path."""
-    if os.name == "nt":
+# DriveInfo answers from the volume manager; Win32_CDROMDrive can stall while
+# MakeMKV holds the drive.
+WINDOWS_MEDIA_QUERY = (
+    "[System.IO.DriveInfo]::GetDrives() | "
+    "Where-Object { $_.DriveType -eq 'CDRom' -and $_.IsReady } | "
+    "ForEach-Object { $_.Name.Substring(0, 2) + '|' + $_.VolumeLabel }"
+)
+
+
+def parse_windows_media(output: str) -> dict[str, str]:
+    """Parse `F:|LABEL` lines; a loaded disc without a label still counts."""
+    labels: dict[str, str] = {}
+    for line in output.splitlines():
+        drive, _, label = line.strip().partition("|")
+        if re.fullmatch(r"[A-Za-z]:", drive):
+            labels[drive.upper()] = label.strip() or f"DISC_{drive[0].upper()}"
+    return labels
+
+
+def windows_media_labels() -> dict[str, str]:
+    """Return loaded optical media labels keyed by drive letter, e.g. `F:`."""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_MEDIA_QUERY],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # A drive that is still spinning up can stall the query; retry next poll.
         return {}
+    return parse_windows_media(result.stdout)
+
+
+def optical_media_labels() -> dict[str, str]:
+    """Return loaded optical media labels keyed by device (/dev/sr* or a drive letter)."""
+    if os.name == "nt":
+        return windows_media_labels()
 
     context = None
     try:
@@ -33,13 +68,14 @@ def optical_media_labels() -> dict[str, str]:
             if not name.startswith("/dev/sr"):
                 continue
             label = str(device.get("ID_FS_LABEL", "")).strip()
-            if label:
-                labels[name] = label
+            if device.get("ID_CDROM_MEDIA") == "1":
+                labels[name] = label or f"DISC_{device.sys_name}"
 
     for device in Path("/dev").glob("sr*"):
         name = str(device)
         if name in labels:
             continue
+        media_blocks = 0
         try:
             media_blocks = int(
                 (Path("/sys/class/block") / device.name / "size")
@@ -61,8 +97,8 @@ def optical_media_labels() -> dict[str, str]:
         except (OSError, subprocess.TimeoutExpired):
             continue
         label = parse_blkid_label(result.stdout)
-        if label:
-            labels[name] = label
+        if label or media_blocks > 0:
+            labels[name] = label or f"DISC_{device.name}"
     return labels
 
 

@@ -1,0 +1,20 @@
+# Hardware-free demo: two fake drives, real image, real PostgreSQL and migrations.
+#   docker compose -f compose.yaml -f compose.simulate.yaml up -d --build
+name: openripper-demo
+services:
+  postgres:
+    volumes: !override
+      - openripper-demo-postgres:/var/lib/postgresql/data
+  openripper:
+    container_name: openripper-demo
+    privileged: false
+    ports: !override
+      - "8081:8080"
+    volumes: !override
+      - ./data/demo-config:/config
+      - ./data/demo-library:/media/library
+    environment:
+      OPENRIPPER_SIMULATE: "true"
+      OPENRIPPER_UDEV_DISCOVERY: "false"
+volumes:
+  openripper-demo-postgres:

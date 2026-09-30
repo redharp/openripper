@@ -1,4 +1,8 @@
-from disc_goblin.makemkv import (
+import pytest
+
+from openripper.makemkv import (
+    MakeMKVBackend,
+    MakeMKVError,
     choose_titles,
     fingerprint_disc,
     makemkv_failure,
@@ -93,3 +97,22 @@ def test_makemkv_failure_keeps_the_actionable_tail() -> None:
     failure = makemkv_failure(messages, "No MKV was created")
     assert failure.startswith("No MKV was created\nline 8")
     assert failure.endswith("line 19")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ('MSG:5053,1544,1,"Start evaluation?"\nTCOUNT:0', "MakeMKV activation required"),
+        ('MSG:5010,0,0,"Disc read error"\nTCOUNT:0', "Disc read error"),
+    ],
+)
+async def test_empty_scan_exposes_cause(monkeypatch, output, expected):
+    backend = MakeMKVBackend("makemkvcon")
+
+    async def capture(*args, **kwargs):
+        return output
+
+    monkeypatch.setattr(backend, "_capture", capture)
+    with pytest.raises(MakeMKVError, match=expected):
+        await backend.scan_disc("/dev/sr0")

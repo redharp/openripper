@@ -3,11 +3,11 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from disc_goblin.db import Database
+from openripper.db import Database
 
 
 def test_overview_round_trip(tmp_path: Path) -> None:
-    database = Database(f"sqlite:///{tmp_path / 'disc-goblin.db'}")
+    database = Database(f"sqlite:///{tmp_path / 'openripper.db'}")
     database.initialize()
     database.upsert_drive(
         {
@@ -38,7 +38,7 @@ def test_overview_round_trip(tmp_path: Path) -> None:
 
 
 def test_database_rejects_two_active_jobs_for_one_drive(tmp_path: Path) -> None:
-    database = Database(f"sqlite:///{tmp_path / 'disc-goblin.db'}")
+    database = Database(f"sqlite:///{tmp_path / 'openripper.db'}")
     database.initialize()
     database.upsert_drive(
         {

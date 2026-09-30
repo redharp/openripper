@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import uvicorn
 
+from .config import _env
+
 
 def run() -> None:
     uvicorn.run(
-        "disc_goblin.api:create_app",
+        "openripper.api:create_app",
         host="0.0.0.0",
-        port=8080,
+        port=int(_env("OPENRIPPER_PORT", "8080")),
         factory=True,
         proxy_headers=True,
     )

@@ -3,12 +3,21 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "disc-goblin"
+name = "openripper"
 version = "0.1.0"
-description = "Automatic MakeMKV ripping appliance with safe Plex/Jellyfin naming"
+description = "Self-hosted automatic DVD and Blu-ray ripping to your own storage"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: FastAPI",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
 authors = [{ name = "Trevor" }]
 dependencies = [
   "alembic>=1.16,<2",
@@ -16,7 +25,6 @@ dependencies = [
   "httpx>=0.28,<1",
   "psycopg[binary]>=3.2,<4",
   "pyudev>=0.24,<1; sys_platform == 'linux'",
-  "PyYAML>=6,<7",
   "sqlalchemy>=2.0,<3",
   "uvicorn[standard]>=0.35,<1",
 ]
@@ -29,10 +37,24 @@ dev = [
 ]
 
 [project.scripts]
-disc-goblin = "disc_goblin.main:run"
+openripper = "openripper.main:run"
+
+[project.urls]
+Homepage = "https://github.com/redharp/openripper"
+Repository = "https://github.com/redharp/openripper"
+Issues = "https://github.com/redharp/openripper/issues"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src", "/tests", "/migrations", "/docker", "/docs/DEPLOYMENT.md",
+  "/README.md", "/LICENSE", "/CONTRIBUTING.md", "/SECURITY.md",
+  "/THIRD_PARTY_NOTICES.md", "/pyproject.toml", "/alembic.ini",
+  "/Dockerfile", "/compose*.yaml", "/.env.example", "/run-*.cmd",
+  "/scripts", "/.dockerignore",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/disc_goblin"]
+packages = ["src/openripper"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
