@@ -1,0 +1,64 @@
+name: openripper
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-openripper}"
+      POSTGRES_USER: "${POSTGRES_USER:-openripper}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-change-me}"
+    volumes:
+      - openripper-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  openripper:
+    build:
+      context: .
+    image: openripper:local
+    container_name: openripper
+    init: true
+    restart: unless-stopped
+    privileged: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${OPENRIPPER_PORT:-8080}:8080"
+    environment:
+      OPENRIPPER_DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-openripper}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-openripper}"
+      OPENRIPPER_AUTO_RIP: "${OPENRIPPER_AUTO_RIP:-true}"
+      OPENRIPPER_OUTPUT_MODE: "${OPENRIPPER_OUTPUT_MODE:-disc}"
+      OPENRIPPER_PREFERENCES_PATH: /config/openripper.json
+      OPENRIPPER_SIMULATE: "${OPENRIPPER_SIMULATE:-false}"
+      OPENRIPPER_AUTO_PUBLISH_CONFIDENCE: "${OPENRIPPER_AUTO_PUBLISH_CONFIDENCE:-0.88}"
+      OPENRIPPER_EJECT_ON_SUCCESS: "${OPENRIPPER_EJECT_ON_SUCCESS:-true}"
+      OPENRIPPER_MAKEMKV_KEY: "${OPENRIPPER_MAKEMKV_KEY:-}"
+      OPENRIPPER_MAX_CONCURRENT_RIPS: "${OPENRIPPER_MAX_CONCURRENT_RIPS:-2}"
+      OPENRIPPER_MIN_TITLE_SECONDS: "${OPENRIPPER_MIN_TITLE_SECONDS:-1200}"
+      OPENRIPPER_POLL_INTERVAL: "${OPENRIPPER_POLL_INTERVAL:-8}"
+      OPENRIPPER_RIP_MODE: "${OPENRIPPER_RIP_MODE:-smart}"
+      OPENRIPPER_TMDB_TOKEN: "${OPENRIPPER_TMDB_TOKEN:-}"
+      OPENRIPPER_UDEV_DISCOVERY: "${OPENRIPPER_UDEV_DISCOVERY:-true}"
+      OPENRIPPER_COMPATIBILITY_CHECK: "${OPENRIPPER_COMPATIBILITY_CHECK:-true}"
+      OPENRIPPER_MOVIE_ROOT: "${OPENRIPPER_MOVIE_ROOT:-/media/library/Movies}"
+      OPENRIPPER_TV_ROOT: "${OPENRIPPER_TV_ROOT:-/media/library/TV}"
+    volumes:
+      - ./config:/config
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+      - type: bind
+        source: "${OPENRIPPER_LIBRARY_HOST_PATH:-./library}"
+        target: /media/library
+    # MakeMKV discovers both /dev/sr* block devices and their /dev/sg* SCSI
+    # generic partners. See docs/DEPLOYMENT.md for a least-privilege override.
+
+volumes:
+  openripper-postgres:
+    name: "${OPENRIPPER_POSTGRES_VOLUME:-openripper-postgres}"
