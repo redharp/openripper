@@ -1,6 +1,6 @@
 # OpenRipper
 
-Self-hosted DVD and Blu-ray ripping. Insert a disc and save it to your own storage,
+Self-hosted DVD and Blu-ray auto ripper. Insert a disc and save it to your own storage,
 or turn automation off and start each rip from the queue.
 
 - Multiple drives, live progress and configurable concurrent jobs
@@ -8,6 +8,10 @@ or turn automation off and start each rip from the queue.
 - Audio, subtitles, extras and optional HandBrake presets
 - Sonarr/Radarr imports and naming for existing library titles
 - Windows desktop companion or Linux Docker deployment
+
+[![OpenRipper demo queue showing active rips, transfer speeds, destinations and waiting discs](docs/screenshots/rip-queue.jpg)](docs/SCREENSHOTS.md)
+
+[More screenshots: settings and integrations](docs/SCREENSHOTS.md) · Demo data shown.
 
 ## Docker
 
