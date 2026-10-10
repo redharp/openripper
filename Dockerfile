@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM jlesage/makemkv:v26.07.2@sha256:0b81851803e805cb1ac1428c790f18813697417d507a93db6945c1ac30378bc3 AS makemkv
 
-FROM python:3.12-alpine3.22
+FROM python:3.14-alpine3.22
 LABEL org.opencontainers.image.title="OpenRipper"
 LABEL org.opencontainers.image.description="Self-hosted automatic DVD and Blu-ray ripping"
 LABEL org.opencontainers.image.version="0.1.0"
