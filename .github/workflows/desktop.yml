@@ -21,7 +21,7 @@ jobs:
         run: |
           $env:Path += ';C:\Program Files (x86)\Inno Setup 6'
           ./scripts/build-desktop.ps1 -Installer
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: OpenRipper-windows-x64
           path: |
