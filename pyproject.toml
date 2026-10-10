@@ -33,7 +33,7 @@ dependencies = [
 desktop = ["pywebview>=6.0,<7; sys_platform == 'win32'"]
 packaging = ["pyinstaller>=6.16,<7; sys_platform == 'win32'"]
 dev = [
-  "pytest>=8.4,<9",
+  "pytest>=8.4,<10",
   "pytest-asyncio>=1.1,<2",
   "ruff>=0.12,<1",
 ]
