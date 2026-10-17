@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from openripper.api import create_app
@@ -73,7 +74,7 @@ def test_advanced_settings_validate_and_persist_without_partial_updates(tmp_path
             {"tv_root": "relative"},
             {"preferred_languages": "English"},
             {"max_concurrent_rips": 0},
-            {"disc_folder_template": "{disc}"},
+            {"disc_folder_template": "../{disc}"},
         ):
             assert client.put("/api/settings", json={**values, **bad}).status_code == 422
         assert client.get("/api/settings").json() == values
@@ -116,3 +117,16 @@ def test_cannot_change_destination_during_rip(tmp_path):
         values["max_concurrent_rips"] = 4
         assert client.put("/api/settings", json=values).status_code == 200
         assert client.get("/api/overview").json()["runtime"]["max_concurrent_rips"] == 4
+
+
+@pytest.mark.parametrize(
+    "template, expected",
+    [("{disc} - {job_id}", "{disc}"), ("{title} ({year})", "{title} ({year})")],
+)
+def test_existing_default_folder_template_upgrades_without_replacing_custom_names(
+    tmp_path, monkeypatch, template, expected
+):
+    preferences = tmp_path / "settings.json"
+    preferences.write_text(json.dumps({"disc_folder_template": template}))
+    monkeypatch.setenv("OPENRIPPER_PREFERENCES_PATH", str(preferences))
+    assert Settings.from_env().disc_folder_template == expected

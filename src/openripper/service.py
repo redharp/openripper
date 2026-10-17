@@ -406,7 +406,7 @@ class RipperService:
                 title=match.title,
                 year=match.year,
                 metadata_confidence=match.confidence,
-                season=disc_season(drive.disc_name)
+                season=disc_season(drive.disc_name, titles)
                 if (media_type or match.media_type) == "tv"
                 else None,
                 status="queued",
@@ -602,7 +602,7 @@ class RipperService:
             await self.broadcast()
 
     async def complete_disc(self, job_id: str) -> None:
-        """Finish all titles together; a unique folder never replaces another rip."""
+        """Finish all titles together without replacing an existing disc folder."""
         job = self.database.job_detail(job_id)
         assert job
         stage = Path(job["stage_path"])
@@ -613,6 +613,9 @@ class RipperService:
         await self.broadcast()
         # Staging is under the configured destination, so this is one filesystem rename.
         destination.parent.mkdir(parents=True, exist_ok=True)
+        # Recheck after broadcasting: another drive may have published this name.
+        if destination.exists():
+            raise FileExistsError(f"Refusing to overwrite {destination}")
         stage.rename(destination)
         await self._save_artwork(job, destination)
         for title in job["titles"]:
@@ -645,7 +648,7 @@ class RipperService:
                     root,
                     show=job["title"],
                     year=job["year"],
-                    season=int(job["season"] or 1),
+                    season=int(job["season"] if job["season"] is not None else 1),
                     episode=int(job["episode_start"] or 1),
                 ).parent
             root = Path(override) / "Movies" if override else self.settings.movie_root
@@ -658,13 +661,11 @@ class RipperService:
         job_id = job["id"]
         folder_name = render_name(
             self.settings.disc_folder_template,
-            disc=clean_component(job["disc_name"], "Disc")[:100],
+            disc=clean_component(job["disc_name"], "Disc"),
             job_id=job_id,
             title=job["title"],
             year=job["year"] or 0,
         )
-        if job_id not in folder_name:
-            folder_name = f"{folder_name[:130]} - {job_id}"
         return self.media_root(job["drive_id"], job["media_type"]) / folder_name
 
     async def publish_job(self, job_id: str) -> dict[str, Any]:
@@ -676,9 +677,14 @@ class RipperService:
             raise ValueError("This job has no completed title files to publish")
         if not job["title"]:
             raise ValueError("A title is required before publishing")
+        if job["media_type"] == "tv" and (job["season"] is None or job["episode_start"] is None):
+            raise ValueError("Confirm the TV season and first episode before publishing")
         self.database.update_job(job_id, status="publishing", error="")
         await self.broadcast()
-        ripped.sort(key=lambda item: item["duration_seconds"], reverse=True)
+        if job["media_type"] == "tv":
+            ripped.sort(key=lambda item: item["title_index"])
+        else:
+            ripped.sort(key=lambda item: item["duration_seconds"], reverse=True)
         published: list[Path] = []
         override = self.settings.drive_paths.get(job["drive_id"])
         movie_root = Path(override) / "Movies" if override else self.settings.movie_root
@@ -687,15 +693,20 @@ class RipperService:
             source = Path(title["ripped_path"])
             if not source.exists():
                 raise FileNotFoundError(f"Staged file is missing: {source.name}")
+            episode_name = title["name"]
             if job["media_type"] == "tv":
-                episode = int(job["episode_start"] or 1) + index
+                episode = int(job["episode_start"]) + index
+                if episode_name == "MainFeature" or disc_title(episode_name)[0].casefold() == (
+                    disc_title(job["title"])[0].casefold()
+                ):
+                    episode_name = ""
                 destination = tv_destination(
                     tv_root,
                     show=job["title"],
                     year=job["year"],
-                    season=int(job["season"] or 1),
+                    season=int(job["season"]),
                     episode=episode,
-                    episode_title=title["name"] if title["name"] != "MainFeature" else "",
+                    episode_title=episode_name,
                 )
             elif index == 0:
                 destination = movie_destination(
@@ -729,10 +740,11 @@ class RipperService:
                         edition_suffix=f" {{edition-{clean_component(job['edition'])}}}"
                         if job["edition"]
                         else "",
-                        season=int(job["season"] or 1),
-                        episode=int(job["episode_start"] or 1) + index,
-                        episode_suffix=f" - {clean_component(title['name'])}"
-                        if title["name"] and title["name"] != "MainFeature"
+                        season=int(job["season"] if job["season"] is not None else 1),
+                        episode=int(job["episode_start"] if job["episode_start"] is not None else 1)
+                        + index,
+                        episode_suffix=f" - {clean_component(episode_name)}"
+                        if episode_name and episode_name != "MainFeature"
                         else "",
                         title_index=title["title_index"],
                     )
@@ -840,6 +852,12 @@ class RipperService:
             raise ValueError("Only jobs awaiting review can be edited")
         if media_type not in {"movie", "tv"}:
             raise ValueError("media_type must be movie or tv")
+        if (
+            self.settings.output_mode == "library"
+            and media_type == "tv"
+            and (season is None or episode_start is None)
+        ):
+            raise ValueError("Confirm the TV season and first episode before publishing")
         if selected_title_ids is not None:
             valid = {item["id"] for item in existing["titles"]}
             if not selected_title_ids or not set(selected_title_ids).issubset(valid):

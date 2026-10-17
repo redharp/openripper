@@ -49,6 +49,19 @@ treated as confirmed metadata. Movie and TV folders now apply in both output
 modes, including disc-folder mode. Per-drive roots contain Movies and TV folders.
 Staging for new jobs stays alongside the selected destination.
 
+Disc-folder mode defaults to `{disc}`: the disc name with filesystem-unsafe
+characters removed, without a job-ID suffix. Saved settings using the former
+`{disc} - {job_id}` default upgrade automatically; custom templates are preserved.
+MakeMKV's output filenames stay unchanged in this mode. If a destination folder
+already exists, the new rip stays in staging and reports a conflict instead of
+overwriting it. This change does not rename previously completed folders.
+
+TV season detection also reads MakeMKV title names and written-out seasons such
+as “Season One.” In media-library mode, confirm the season and first episode;
+selected titles receive consecutive numbers in disc-title order, never runtime
+order. Disc-title order is not guaranteed to be broadcast order, so check it in
+the preview or use Sonarr's explicit episode assignments.
+
 Use **Clear** on a failure or **Clear failed rips** above the list to hide entries.
 This preserves partial files and diagnostic records; it never deletes media.
 

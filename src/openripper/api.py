@@ -344,7 +344,7 @@ def create_app(
             try:
                 for name in ("disc_folder_template", "movie_name_template", "tv_name_template"):
                     if name in values:
-                        validate_template(values[name], unique=name == "disc_folder_template")
+                        validate_template(values[name])
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
             updated = replace(settings, **values)

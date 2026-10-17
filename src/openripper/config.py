@@ -40,7 +40,7 @@ class Settings:
     output_mode: str = "disc"
     preferences_path: Path = Path("config/openripper.json")
     drive_paths: dict[str, str] = field(default_factory=dict)
-    disc_folder_template: str = "{disc} - {job_id}"
+    disc_folder_template: str = "{disc}"
     movie_name_template: str = "{title}{year_suffix}{edition_suffix}"
     tv_name_template: str = "{title} - S{season:02d}E{episode:02d}{episode_suffix}"
     include_extras: bool = False
@@ -57,6 +57,9 @@ class Settings:
     integrations: dict[str, dict] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
+        # Upgrade the previous default, including saved preferences.
+        if self.disc_folder_template == "{disc} - {job_id}":
+            self.disc_folder_template = "{disc}"
         if self.output_mode not in {"disc", "library"}:
             raise ValueError("OPENRIPPER_OUTPUT_MODE must be disc or library")
         if self.rip_mode not in {"smart", "main_feature", "all"}:

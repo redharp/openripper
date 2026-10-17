@@ -54,7 +54,7 @@ async def finish(service):
 
 
 @pytest.mark.asyncio
-async def test_insert_rips_to_destination_once_and_reinsert_makes_unique_folder(tmp_path):
+async def test_disc_folder_uses_label_and_duplicate_preserves_both_rips(tmp_path):
     service = make_service(tmp_path)
     await service.poll_once()
     await finish(service)
@@ -73,8 +73,11 @@ async def test_insert_rips_to_destination_once_and_reinsert_makes_unique_folder(
     await finish(service)
     jobs = service.database.overview()["history"]
     assert len(jobs) == 2
-    assert all(job["status"] == "complete" for job in jobs)
-    assert len({job["final_path"] for job in jobs}) == 2
+    assert {job["status"] for job in jobs} == {"complete", "failed"}
+    duplicate = next(job for job in jobs if job["status"] == "failed")
+    assert "Refusing to overwrite" in duplicate["error"]
+    assert (Path(duplicate["stage_path"]) / "title00.mkv").exists()
+    assert Path(first["final_path"]).name == "MY_DVD"
     assert original.read_bytes() == b"test video contents"
 
 
@@ -171,7 +174,7 @@ async def test_existing_destination_is_never_overwritten(tmp_path):
     service = make_service(tmp_path)
     await service.poll_once()
     job = service.database.overview()["active_jobs"][0]
-    occupied = service.settings.movie_root / f"MY_DVD - {job['id']}"
+    occupied = service.settings.movie_root / "MY_DVD"
     occupied.mkdir(parents=True)
     (occupied / "keep.txt").write_text("keep")
     await finish(service)
@@ -451,3 +454,84 @@ async def test_extras_do_not_reintroduce_known_duplicates_and_evidence_persists(
     assert by_index[1]["duplicate_of"] == 0
     assert by_index[3]["duplicate_of"] == 2
     assert by_index[0]["segment_map"] == "50"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("season", [0, 2])
+async def test_tv_publish_keeps_disc_order_and_does_not_append_disc_label(tmp_path, season):
+    service = make_service(tmp_path, output_mode="library", auto_rip=False)
+    drive = (await service.backend.list_drives())[0]
+    service.database.upsert_drive(drive.to_dict())
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    service.database.create_job(
+        dict(
+            id="tv-order",
+            drive_id=drive.id,
+            fingerprint="tv-order",
+            disc_name="EXAMPLE_SHOW_S2_D2",
+            title="Example Show",
+            media_type="tv",
+            season=season,
+            episode_start=4,
+            status="needs_review",
+            stage_path=str(stage),
+        )
+    )
+    service.database.update_job("tv-order", season=season, episode_start=4)
+    titles = [
+        TitleInfo(
+            index=i, name="Example Show Season Two Disc 2", duration_seconds=duration, selected=True
+        ).to_dict()
+        for i, duration in [(7, 2200), (9, 3300), (12, 2700)]
+    ]
+    service.database.replace_titles("tv-order", titles)
+    for item in service.database.job_detail("tv-order")["titles"]:
+        path = stage / f"title-{item['title_index']}.mkv"
+        path.write_text(str(item["title_index"]))
+        service.database.execute(
+            "update titles set ripped_path=? where id=?", (str(path), item["id"])
+        )
+    assert [t["title_index"] for t in service.database.job_detail("tv-order")["titles"]] == [
+        7,
+        9,
+        12,
+    ]
+    await service.publish_job("tv-order")
+    output = service.settings.tv_root / "Example Show" / f"Season {season:02d}"
+    assert [
+        (output / f"Example Show - S{season:02d}E{episode:02d}.mkv").read_text()
+        for episode in [4, 5, 6]
+    ] == ["7", "9", "12"]
+
+
+@pytest.mark.asyncio
+async def test_tv_publish_requires_episode_confirmation_without_mutating_job(tmp_path):
+    service = make_service(tmp_path, output_mode="library", auto_rip=False)
+    drive = (await service.backend.list_drives())[0]
+    service.database.upsert_drive(drive.to_dict())
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    source = stage / "episode.mkv"
+    source.write_bytes(b"episode")
+    service.database.create_job(
+        dict(
+            id="tv-review",
+            drive_id=drive.id,
+            fingerprint="tv-review",
+            disc_name="EXAMPLE_SHOW_S2_D2",
+            title="Example Show",
+            media_type="tv",
+            season=2,
+            status="needs_review",
+            stage_path=str(stage),
+        )
+    )
+    service.database.replace_titles("tv-review", [TitleInfo(index=0, selected=True).to_dict()])
+    service.database.execute(
+        "update titles set ripped_path=? where job_id=?", (str(source), "tv-review")
+    )
+    with pytest.raises(ValueError, match="first episode"):
+        await service.publish_job("tv-review")
+    assert source.read_bytes() == b"episode"
+    assert service.database.job_detail("tv-review")["status"] == "needs_review"

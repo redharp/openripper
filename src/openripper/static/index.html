@@ -323,8 +323,8 @@
                   required
               /></label>
               <p class="field-help">
-                Use {disc}, {title}, {year}, and {job_id}. Keep {job_id} for
-                collision protection.
+                Default: {disc}, the disc name without a hash. Existing folders
+                are never overwritten. Optional: {title}, {year}, {job_id}.
               </p>
               <label class="field"
                 ><span>Movie filename format</span
@@ -711,6 +711,8 @@
         </div>
         <fieldset class="title-picker">
           <legend>Titles to publish</legend>
+          <p class="tv-only">TV episodes are numbered in the title order shown below.
+            Check the disc's episode order and first episode before publishing.</p>
           <div id="review-titles"></div>
         </fieldset>
         <div id="review-error" class="form-error" role="alert"></div>

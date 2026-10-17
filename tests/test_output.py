@@ -16,8 +16,10 @@ def test_naming_formats_episodes_and_sanitizes_source():
         render_name("{title} - S{season:02d}E{episode:02d}", title="My:Show", season=2, episode=3)
         == "My - Show - S02E03"
     )
-    with pytest.raises(ValueError, match="job_id"):
-        validate_template("{disc}", unique=True)
+    validate_template("{disc}")
+    assert (
+        render_name("{disc}", disc="HARRY_POTTER_CHAMBER_SECRETS") == "HARRY_POTTER_CHAMBER_SECRETS"
+    )
 
 
 def test_track_selection_profile_does_not_depend_on_global_preferences(tmp_path):

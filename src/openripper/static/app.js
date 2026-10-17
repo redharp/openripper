@@ -889,8 +889,8 @@ async function openReview(jobId) {
   $("#review-title").value = job.title || "";
   $("#review-year").value = job.year || "";
   $("#review-edition").value = job.edition || "";
-  $("#review-season").value = job.season ?? 1;
-  $("#review-episode").value = job.episode_start ?? 1;
+  $("#review-season").value = job.season ?? "";
+  $("#review-episode").value = job.episode_start ?? "";
   const type = job.media_type === "tv" ? "tv" : "movie";
   $(`input[name="media_type"][value="${type}"]`).checked = true;
   $("#review-form").classList.toggle("tv-mode", type === "tv");
@@ -1048,9 +1048,9 @@ $("#review-form").addEventListener("submit", async (event) => {
     media_type: type,
     title: $("#review-title").value.trim(),
     year: $("#review-year").value ? Number($("#review-year").value) : null,
-    season: type === "tv" ? Number($("#review-season").value || 1) : null,
+    season: type === "tv" && $("#review-season").value !== "" ? Number($("#review-season").value) : null,
     episode_start:
-      type === "tv" ? Number($("#review-episode").value || 1) : null,
+      type === "tv" && $("#review-episode").value !== "" ? Number($("#review-episode").value) : null,
     edition: type === "movie" ? $("#review-edition").value.trim() : "",
     selected_title_ids: $$('input[name="selected_title"]:checked').map(
       (input) => Number(input.value),

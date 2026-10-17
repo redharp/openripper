@@ -309,9 +309,7 @@ class Database:
             result["titles"] = [
                 _model_dict(row)
                 for row in session.scalars(
-                    select(Title)
-                    .where(Title.job_id == job_id)
-                    .order_by(Title.duration_seconds.desc())
+                    select(Title).where(Title.job_id == job_id).order_by(Title.title_index)
                 ).all()
             ]
             result["events"] = [

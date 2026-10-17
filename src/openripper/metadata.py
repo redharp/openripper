@@ -9,16 +9,48 @@ import httpx
 
 from .naming import title_from_disc_label
 
+SEASON_WORDS = {
+    word: index
+    for index, word in enumerate(
+        [
+            "zero",
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "six",
+            "seven",
+            "eight",
+            "nine",
+            "ten",
+            "eleven",
+            "twelve",
+            "thirteen",
+            "fourteen",
+            "fifteen",
+            "sixteen",
+            "seventeen",
+            "eighteen",
+            "nineteen",
+            "twenty",
+        ]
+    )
+}
 SEASON_MARKER = re.compile(
     r"(?:^|[\s_.-])(?:S(?P<short>\d{1,3})(?:E\d+)?(?:D\d+)?|"
-    r"SEASON[\s_.-]*(?P<long>\d+))(?=$|[\s_.-])",
+    r"SEASON[\s_.-]*(?P<long>\d+|" + "|".join(SEASON_WORDS) + r"))(?=$|[\s_.-])",
     re.I,
 )
 
 
-def disc_season(disc_name: str) -> int | None:
+def disc_season(disc_name: str, titles=()) -> int | None:
     match = SEASON_MARKER.search(disc_name)
-    return int(match.group("short") or match.group("long")) if match else None
+    if match:
+        value = (match.group("short") or match.group("long")).lower()
+        return int(value) if value.isdigit() else SEASON_WORDS[value]
+    seasons = {disc_season(t.name) for t in titles} - {None}
+    return seasons.pop() if len(seasons) == 1 else None
 
 
 def disc_title(disc_name: str) -> tuple[str, int | None]:
@@ -97,6 +129,13 @@ class MetadataResolver:
     async def resolve(self, disc_name: str, titles=()) -> MetadataMatch:
         title, year = disc_title(disc_name)
         kind = disc_media_type(disc_name)
+        # Volume labels can be generic while MakeMKV's title names carry the season.
+        if kind != "tv" and disc_season(disc_name, titles) is not None:
+            named = [t.name for t in titles if disc_season(t.name) is not None]
+            names = {disc_title(name) for name in named}
+            if len(names) == 1:
+                title, year = names.pop()
+                kind = "tv"
         source = "season marker" if kind == "tv" else "disc-label"
         if kind != "tv" and episode_structure(titles):
             kind, source = "tv", "episode structure"
