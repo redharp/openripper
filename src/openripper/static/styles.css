@@ -1447,3 +1447,30 @@ dialog::backdrop {
   .pending-row { flex-direction: column; align-items: stretch; padding: 18px; }
   .pending-row .job-actions { flex-wrap: wrap; justify-content: flex-start; }
 }
+
+/* Episode matching keeps completed rips distinct from active drive work. */
+.matching-heading { color: var(--ink); }
+.matching-row .job-actions { flex-shrink: 0; }
+#episode-matching { margin-top: 24px; }
+.episode-lookup { margin-bottom: 24px; }
+.episode-search { display: flex; align-items: end; gap: 12px; margin: 16px 0; }
+.episode-search .field { flex: 1; min-width: 0; margin: 0; }
+.episode-file { border: 0; border-top: 1px solid var(--line); padding: 20px 0; margin: 0; min-width: 0; }
+.episode-file legend { font-weight: 650; padding-right: 12px; }
+.episode-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.episode-name-field { grid-column: 1 / -1; }
+.episode-file select { width: 100%; min-width: 0; }
+.episode-file .path, .episode-file .field-help { overflow-wrap: anywhere; }
+#review-dialog .title-option { flex-wrap: wrap; }
+#review-dialog .title-option span { flex-basis: 100%; margin-left: 26px; }
+@media (max-width: 600px) {
+  .episode-search { align-items: stretch; flex-direction: column; }
+  .episode-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .matching-heading { align-items: start; flex-direction: column; }
+}
+
+#review-form > .dialog-actions { position: sticky; bottom: -32px; background: var(--surface, #fff); padding: 16px 0; border-top: 1px solid var(--line); z-index: 1; }
+.episode-file legend label { display: inline-flex; align-items: center; gap: 8px; }
+@media (max-width: 600px) {
+  #review-form > .dialog-actions { bottom: -20px; }
+}

@@ -127,7 +127,7 @@ async def test_pending_disc_is_removed_when_ejected_and_survives_restart(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("manual", [False, True])
-async def test_tv_disc_and_manual_override_use_tv_root_for_staging_and_final(tmp_path, manual):
+async def test_tv_disc_and_manual_override_hold_files_outside_tv_root(tmp_path, manual):
     service = make_service(tmp_path, auto_rip=not manual)
     service.backend.label = "UNLABELED_DISC" if manual else "EXAMPLE_SHOW_S1_D1"
     await service.poll_once()
@@ -139,10 +139,13 @@ async def test_tv_disc_and_manual_override_use_tv_root_for_staging_and_final(tmp
             await service.start_pending(job["id"], "tv")
     await finish(service)
     result = service.database.job_detail(job["id"])
-    assert result["status"] == "complete"
+    assert result["status"] == "needs_review"
     assert result["media_type"] == "tv"
-    assert Path(result["stage_path"]).is_relative_to(service.settings.tv_root)
-    assert Path(result["final_path"]).parent == service.settings.tv_root
+    assert result["progress"] == 1
+    assert not Path(result["stage_path"]).is_relative_to(service.settings.tv_root)
+    assert not result["final_path"]
+    assert not list(service.settings.tv_root.rglob("*.mkv"))
+    assert service.overview()["runtime"]["slots_in_use"] == 0
     assert not list(service.settings.movie_root.rglob("*.mkv"))
 
 
@@ -497,12 +500,28 @@ async def test_tv_publish_keeps_disc_order_and_does_not_append_disc_label(tmp_pa
         9,
         12,
     ]
-    await service.publish_job("tv-order")
+    assignments = [
+        {"title_id": t["id"], "season": season, "episode": number}
+        for t, number in zip(
+            service.database.job_detail("tv-order")["titles"], [6, 4, 5], strict=True
+        )
+    ]
+    await service.update_metadata(
+        "tv-order",
+        media_type="tv",
+        title="Example Show",
+        year=None,
+        season=season,
+        episode_start=None,
+        edition="",
+        selected_title_ids=None,
+        episode_assignments=assignments,
+    )
     output = service.settings.tv_root / "Example Show" / f"Season {season:02d}"
     assert [
         (output / f"Example Show - S{season:02d}E{episode:02d}.mkv").read_text()
         for episode in [4, 5, 6]
-    ] == ["7", "9", "12"]
+    ] == ["9", "12", "7"]
 
 
 @pytest.mark.asyncio
@@ -531,7 +550,7 @@ async def test_tv_publish_requires_episode_confirmation_without_mutating_job(tmp
     service.database.execute(
         "update titles set ripped_path=? where job_id=?", (str(source), "tv-review")
     )
-    with pytest.raises(ValueError, match="first episode"):
+    with pytest.raises(ValueError, match="Match every selected TV file"):
         await service.publish_job("tv-review")
     assert source.read_bytes() == b"episode"
     assert service.database.job_detail("tv-review")["status"] == "needs_review"

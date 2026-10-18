@@ -329,6 +329,15 @@ class Database:
                     title.update(
                         evidence.details.get("titles", {}).get(str(title["title_index"]), {})
                     )
+            assignments = session.scalar(
+                select(Event)
+                .where(Event.job_id == job_id, Event.message == "Episode assignments confirmed")
+                .order_by(Event.id.desc())
+                .limit(1)
+            )
+            result["episode_assignments"] = (
+                assignments.details.get("assignments", []) if assignments else []
+            )
             return result
 
     def add_event(

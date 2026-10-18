@@ -72,6 +72,14 @@ def persist_settings(settings: Settings) -> None:
         temporary.unlink(missing_ok=True)
 
 
+class EpisodeAssignment(BaseModel):
+    title_id: int = Field(gt=0)
+    season: int = Field(ge=0, le=999)
+    episode: int = Field(ge=1, le=9999)
+    episode_end: int | None = Field(default=None, ge=1, le=9999)
+    episode_title: str = Field(default="", max_length=180)
+
+
 class MetadataUpdate(BaseModel):
     media_type: str = Field(pattern="^(movie|tv)$")
     title: str = Field(min_length=1, max_length=180)
@@ -80,6 +88,7 @@ class MetadataUpdate(BaseModel):
     episode_start: int | None = Field(default=None, ge=0, le=9999)
     edition: str = Field(default="", max_length=120)
     selected_title_ids: list[int] | None = None
+    episode_assignments: list[EpisodeAssignment] | None = None
 
 
 class StartRequest(BaseModel):
@@ -401,7 +410,7 @@ def create_app(
             raise HTTPException(404, "Job not found")
         try:
             return await service.update_metadata(job_id, **payload.model_dump())
-        except (ValueError, FileExistsError, FileNotFoundError) as exc:
+        except (ValueError, OSError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/jobs/{job_id}/artwork")

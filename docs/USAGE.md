@@ -52,15 +52,31 @@ Staging for new jobs stays alongside the selected destination.
 Disc-folder mode defaults to `{disc}`: the disc name with filesystem-unsafe
 characters removed, without a job-ID suffix. Saved settings using the former
 `{disc} - {job_id}` default upgrade automatically; custom templates are preserved.
-MakeMKV's output filenames stay unchanged in this mode. If a destination folder
+Movie output filenames from MakeMKV stay unchanged in this mode. If a destination folder
 already exists, the new rip stays in staging and reports a conflict instead of
 overwriting it. This change does not rename previously completed folders.
 
-TV season detection also reads MakeMKV title names and written-out seasons such
-as “Season One.” In media-library mode, confirm the season and first episode;
-selected titles receive consecutive numbers in disc-title order, never runtime
-order. Disc-title order is not guaranteed to be broadcast order, so check it in
-the preview or use Sonarr's explicit episode assignments.
+TV rips always wait at **Needs episode matching**, in either output mode.
+Choose **Match episodes**, confirm the show, and assign every selected file to
+its actual season and episode. Search existing Sonarr shows to choose episode
+names from its catalog, or enter the details manually. A file containing several
+consecutive episodes can use the optional **Through** field. Extras can be
+unselected and remain in staging. OpenRipper never infers broadcast order from
+disc track order or runtime.
+
+**Publish matched episodes** creates `Show/Season NN/Show - SxxExx.mkv` using
+your TV filename template. Missing assignments, duplicate episodes and existing
+output files block publication. Closing the matching screen leaves the rip held;
+submitted assignments persist if publication fails. An enabled Sonarr handoff
+reuses those assignments when the show and episodes match its catalog uniquely. The disc can be ejected and
+the drive reused while a rip waits for matching.
+
+New TV jobs stage in `.openripper-staging` beside the configured TV folder,
+including per-drive destinations. Give OpenRipper write access to that parent,
+and mount it persistently in Docker. Point media scanners at the movie and TV
+folders, not their shared parent. Same-filesystem publication is a rename;
+cross-filesystem publication copies to a temporary non-video filename first.
+Previously completed raw files are not automatically renamed or reclassified.
 
 Use **Clear** on a failure or **Clear failed rips** above the list to hide entries.
 This preserves partial files and diagnostic records; it never deletes media.
@@ -178,8 +194,8 @@ are sent in the link.
   encoding runs only when explicitly enabled in Settings.
 - Disc-folder mode uses the physical label without claiming a metadata match.
   Library mode holds uncertain naming for review.
-- TV episode ordering still needs a season/first-episode confirmation unless a
-  future metadata provider can identify the physical disc unambiguously.
+- TV episodes need explicit per-file matching. Sonarr supplies show and episode
+  names; it cannot identify anonymous disc tracks from their runtime alone.
 - Use OpenRipper only for media you are legally permitted to copy in your
   jurisdiction.
 - MakeMKV is separate software with its own license and beta-key requirements.

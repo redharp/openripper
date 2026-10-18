@@ -6,6 +6,7 @@ from collections import Counter
 from pathlib import Path
 
 from .arr import ArrClient, ArrConfig, ArrError, normalized_title
+from .episodes import validate_assignments
 
 
 def handoff_state(job: dict) -> dict:
@@ -158,7 +159,9 @@ class Handoffs:
                         if normalized_title(m.get("title", "")) == normalized_title(job["title"])
                         and (not job["year"] or m.get("year") == job["year"])
                     ]
-                    if len(matches) != 1 or client.provider == "sonarr":
+                    if len(matches) != 1 or (
+                        client.provider == "sonarr" and not job.get("episode_assignments")
+                    ):
                         state["status"] = "needs_match"
                         await self.record(
                             job_id,
@@ -171,8 +174,35 @@ class Handoffs:
                     selected = [t for t in job["titles"] if t["selected"] and t["ripped_path"]]
                     if not selected:
                         raise ArrError("No finished files were found")
-                    main = max(selected, key=lambda t: t["duration_seconds"])
-                    state["selections"] = [{"title_id": main["id"], "episode_ids": []}]
+                    if client.provider == "sonarr":
+                        assignments = validate_assignments(
+                            job["titles"], job["episode_assignments"]
+                        )
+                        catalog = await client.request(
+                            "GET", "episode", params={"seriesId": state["target_id"]}
+                        )
+                        selections = []
+                        for title_id, assignment in assignments.items():
+                            ids = []
+                            for number in range(
+                                assignment["episode"], assignment["episode_end"] + 1
+                            ):
+                                found = [
+                                    e["id"]
+                                    for e in catalog
+                                    if e.get("seasonNumber") == assignment["season"]
+                                    and e.get("episodeNumber") == number
+                                ]
+                                if len(found) != 1:
+                                    raise ArrError(
+                                        "A confirmed episode was not found uniquely in Sonarr"
+                                    )
+                                ids.extend(found)
+                            selections.append({"title_id": title_id, "episode_ids": ids})
+                        state["selections"] = selections
+                    else:
+                        main = max(selected, key=lambda t: t["duration_seconds"])
+                        state["selections"] = [{"title_id": main["id"], "episode_ids": []}]
                 plan = await client.prepare(job, state["target_id"], state["selections"])
                 state["title"] = plan["title"]
                 selected_ids = {s["title_id"] for s in state["selections"]}

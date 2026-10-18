@@ -284,3 +284,25 @@ async def test_sonarr_rejects_wrong_episode_assignment_before_import(tmp_path, m
             job, 7, [{"title_id": job["titles"][0]["id"], "episode_ids": [999]}]
         )
     assert not server.commands
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("episode, expected", [(2, "complete"), (99, "failed")])
+async def test_sonarr_reuses_confirmed_matching_without_guessing(
+    tmp_path, monkeypatch, episode, expected
+):
+    service, job = await completed_service(tmp_path)
+    service.database.update_job(job["id"], media_type="tv")
+    service.database.add_event(
+        "Episode assignments confirmed",
+        job_id=job["id"],
+        details={"assignments": [dict(title_id=job["titles"][0]["id"], season=1, episode=episode)]},
+    )
+    server = ArrServer(job, "sonarr")
+    install_server(monkeypatch, server)
+    await service.handoffs.auto(job["id"])
+    await drain(service)
+    result = service.database.job_detail(job["id"])
+    assert handoff_state(result)["status"] == expected
+    assert result["status"] == "complete"
+    assert len(server.commands) == (2 if expected == "complete" else 0)
