@@ -5,7 +5,7 @@ import pytest
 from test_autorip import finish, make_service
 
 from openripper.db import Database
-from openripper.episodes import validate_assignments
+from openripper.episodes import named_episodes, validate_assignments
 from openripper.makemkv import TitleInfo
 
 
@@ -229,3 +229,93 @@ async def test_metadata_api_requires_assignments_and_accepts_typed_mapping(tmp_p
         assert completed.status_code == 200
         assert completed.json()["status"] == "complete"
         assert "S01E08" in completed.json()["titles"][0]["ripped_path"]
+
+
+@pytest.mark.parametrize(
+    "existing_name, episode, end",
+    [
+        ("Example Show - S01E02 - Original title [1080p].mkv", 2, None),
+        ("Example.Show.s01e02.2160p.mp4", 2, None),
+        ("Example Show - S01E01-E03.mkv", 2, None),
+        ("Example Show - S01E03.mkv", 2, 4),
+        ("Example Show - S01E01E03.mkv", 3, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_episode_collision_uses_episode_identity_not_filename(
+    tmp_path, existing_name, episode, end
+):
+    service, job = await staged_tv(tmp_path)
+    source = Path(job["titles"][0]["ripped_path"])
+    directory = service.settings.tv_root / "Example Show (2024)" / "Season 01"
+    directory.mkdir(parents=True)
+    existing = directory / existing_name
+    existing.write_bytes(b"keep the existing edition")
+    with pytest.raises(FileExistsError, match="already exists"):
+        await match(
+            service,
+            job,
+            [
+                dict(
+                    title_id=job["titles"][0]["id"],
+                    season=1,
+                    episode=episode,
+                    episode_end=end,
+                    episode_title="A new title",
+                )
+            ],
+        )
+    assert source.read_bytes() == b"test video contents"
+    assert existing.read_bytes() == b"keep the existing edition"
+    assert list(directory.iterdir()) == [existing]
+    assert service.database.job_detail(job["id"])["status"] == "needs_review"
+
+
+def test_episode_tokens_do_not_turn_resolution_into_an_episode_range():
+    assert named_episodes("Example - S01E02-1080p") == {(1, 2)}
+    assert named_episodes("Example - S01E01E03") == {(1, 1), (1, 3)}
+    assert named_episodes("Example - S01E01-E03") == {(1, 1), (1, 2), (1, 3)}
+
+
+@pytest.mark.asyncio
+async def test_episode_collision_is_rechecked_after_broadcast(tmp_path):
+    service, job = await staged_tv(tmp_path)
+    source = Path(job["titles"][0]["ripped_path"])
+    directory = service.settings.tv_root / "Example Show (2024)" / "Season 01"
+    existing = directory / "Example Show - S01E02 - Other drive.mkv"
+
+    async def another_drive_publishes():
+        if service.database.job_detail(job["id"])["status"] == "publishing":
+            directory.mkdir(parents=True, exist_ok=True)
+            existing.write_bytes(b"another drive")
+
+    service.broadcast = another_drive_publishes
+    with pytest.raises(FileExistsError, match="already exists"):
+        await match(
+            service,
+            job,
+            [dict(title_id=job["titles"][0]["id"], season=1, episode=2)],
+        )
+    assert source.exists()
+    assert existing.read_bytes() == b"another drive"
+
+
+@pytest.mark.asyncio
+async def test_movie_extras_setting_does_not_add_tv_bonus_tracks(tmp_path):
+    service = make_service(tmp_path, include_extras=True)
+    service.backend.label = "EXAMPLE_SHOW_S1_D1"
+
+    async def scan_with_bonus(device):
+        return [
+            TitleInfo(index=0, name="Episode", duration_seconds=3600),
+            TitleInfo(index=1, name="Bonus interview", duration_seconds=120),
+        ]
+
+    service.backend.scan_disc = scan_with_bonus
+    await service.poll_once()
+    await finish(service)
+    job = service.database.job_detail(service.database.overview()["active_jobs"][0]["id"])
+    assert job["media_type"] == "tv"
+    assert [t["title_index"] for t in job["titles"] if t["selected"]] == [0]
+    assert job["status"] == "needs_review"
+    assert not list(service.settings.tv_root.rglob("*.mkv"))

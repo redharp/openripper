@@ -109,3 +109,74 @@ async def test_movie_disc_names_with_parts_are_not_tv(label):
     match = await MetadataResolver().resolve(label, titles)
     assert match.media_type == "movie"
     assert disc_season(label, titles) is None
+
+
+def mock_metadata(monkeypatch, results):
+    requests = []
+
+    async def respond(request):
+        requests.append(request)
+        if request.url.host == "image.tmdb.org":
+            return httpx.Response(200, content=b"\xff\xd8test-poster")
+        return httpx.Response(200, json={"results": results})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        "openripper.metadata.httpx.AsyncClient",
+        lambda **kw: original(transport=httpx.MockTransport(respond), **kw),
+    )
+    return requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_poster", ["/remake.jpg", None])
+async def test_ambiguous_remake_does_not_write_a_poster(monkeypatch, tmp_path, second_poster):
+    requests = mock_metadata(monkeypatch, [
+        {"id": 1, "title": "Example", "release_date": "1984-01-01", "poster_path": "/old.jpg"},
+        {"id": 2, "title": "Example", "release_date": "2020-01-01", "poster_path": second_poster},
+    ])
+    assert not await MetadataResolver("test").save_poster(tmp_path, "Example", None, "movie")
+    assert not (tmp_path / "poster.jpg").exists()
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_poster_uses_confirmed_release_year(monkeypatch, tmp_path):
+    requests = mock_metadata(monkeypatch, [
+        {"id": 1, "title": "Example", "release_date": "1984-01-01", "poster_path": "/old.jpg"},
+        {"id": 2, "title": "Example", "release_date": "2020-01-01", "poster_path": "/new.jpg"},
+    ])
+    assert await MetadataResolver("test").save_poster(tmp_path, "Example", 2020, "movie")
+    assert requests[-1].url.path == "/t/p/w500/new.jpg"
+    assert (tmp_path / "poster.jpg").read_bytes() == b"\xff\xd8test-poster"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["id", "release_date"])
+async def test_incomplete_search_result_cannot_autopublish(monkeypatch, missing):
+    candidate = {"id": 1, "media_type": "movie", "title": "Example", "release_date": "2020-01-01"}
+    candidate.pop(missing)
+    mock_metadata(monkeypatch, [candidate])
+    match = await MetadataResolver("test").resolve("EXAMPLE_2020")
+    assert match.source == "disc-label"
+    assert match.confidence < 0.88
+
+
+@pytest.mark.asyncio
+async def test_movie_search_cannot_override_episode_structure(monkeypatch):
+    mock_metadata(monkeypatch, [
+        {"id": 1, "media_type": "movie", "title": "Example", "release_date": "2020-01-01"}
+    ])
+    titles = [TitleInfo(index=i, duration_seconds=d) for i, d in enumerate([2400, 2450, 2500])]
+    match = await MetadataResolver("test").resolve("EXAMPLE", titles)
+    assert match.media_type == "tv"
+    assert match.source == "episode structure"
+
+
+@pytest.mark.asyncio
+async def test_empty_search_results_keep_disc_identity(monkeypatch):
+    mock_metadata(monkeypatch, None)
+    match = await MetadataResolver("test").resolve("1917")
+    assert match.title == "1917"
+    assert match.year is None
+    assert match.source == "disc-label"

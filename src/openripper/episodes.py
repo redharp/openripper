@@ -2,6 +2,48 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
+VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".wmv", ".webm"}
+EPISODE_TOKEN = re.compile(r"(?<![a-z0-9])s(\d{1,3})e(\d{1,4})((?:-?e\d{1,4})*)(?!\d)", re.I)
+
+
+def named_episodes(filename: str) -> set[tuple[int, int]]:
+    """Recognize canonical single, repeated, and ranged SxxExx filename tokens."""
+    episodes = set()
+    for match in EPISODE_TOKEN.finditer(filename):
+        season, previous = int(match[1]), int(match[2])
+        episodes.add((season, previous))
+        for extra in re.finditer(r"(-?)e(\d{1,4})", match[3], re.I):
+            number = int(extra[2])
+            if extra[1] and number >= previous:
+                episodes.update((season, n) for n in range(previous, number + 1))
+            else:
+                episodes.add((season, number))
+            previous = number
+    return episodes
+
+
+def check_existing_episodes(directory: Path, assignment: dict, source: Path) -> None:
+    """A renamed or differently encoded copy still occupies the same episode."""
+    if not directory.exists():
+        return
+    expected = {
+        (assignment["season"], n)
+        for n in range(assignment["episode"], assignment["episode_end"] + 1)
+    }
+    for existing in directory.iterdir():
+        if existing == source or existing.suffix.lower() not in VIDEO_SUFFIXES:
+            continue
+        overlap = expected & named_episodes(existing.stem)
+        if overlap:
+            season, episode = min(overlap)
+            raise FileExistsError(
+                f"Episode S{season:02d}E{episode:02d} already exists: {existing.name}. "
+                "Review the existing episode before publishing another copy"
+            )
+
 
 def validate_assignments(titles: list[dict], assignments: list[dict] | None) -> dict[int, dict]:
     selected = {t["id"] for t in titles if t["selected"]}

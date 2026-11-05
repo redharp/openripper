@@ -52,7 +52,10 @@ Staging for new jobs stays alongside the selected destination.
 Disc-folder mode defaults to `{disc}`: the disc name with filesystem-unsafe
 characters removed, without a job-ID suffix. Saved settings using the former
 `{disc} - {job_id}` default upgrade automatically; custom templates are preserved.
-Movie output filenames from MakeMKV stay unchanged in this mode. If a destination folder
+Movie output filenames from MakeMKV stay unchanged in this mode. Use **Library**
+output for canonical `Movie (Year)/Movie (Year).mkv` names. Edition suffixes include
+Jellyfin's ` - ` version separator and retain Plex's `{edition-Name}` tag.
+If a destination folder
 already exists, the new rip stays in staging and reports a conflict instead of
 overwriting it. This change does not rename previously completed folders.
 
@@ -71,12 +74,24 @@ submitted assignments persist if publication fails. An enabled Sonarr handoff
 reuses those assignments when the show and episodes match its catalog uniquely. The disc can be ejected and
 the drive reused while a rip waits for matching.
 
-New TV jobs stage in `.openripper-staging` beside the configured TV folder,
+New TV jobs and Library-mode movie jobs stage in `.openripper-staging` beside
+their configured library folder,
 including per-drive destinations. Give OpenRipper write access to that parent,
 and mount it persistently in Docker. Point media scanners at the movie and TV
 folders, not their shared parent. Same-filesystem publication is a rename;
 cross-filesystem publication copies to a temporary non-video filename first.
 Previously completed raw files are not automatically renamed or reclassified.
+Existing pending jobs keep their recorded staging locations.
+Raw disc-folder movie jobs retain staging inside their destination root so
+completion stays a same-filesystem rename, including when that root is a mount.
+
+In Library mode, movie rips with multiple possible features wait for review,
+even when the movie identity is confident. A second track lasting an hour or
+at least three quarters of the longest track may be another cut, part or movie;
+it is not automatically classified as an extra. Unknown runtimes also require
+review when several tracks are selected. Select the intended main feature and
+short extras to publish them; unselected files remain in staging for separate
+identification. These runtime checks flag uncertainty, not verified extra content.
 
 Use **Clear** on a failure or **Clear failed rips** above the list to hide entries.
 This preserves partial files and diagnostic records; it never deletes media.

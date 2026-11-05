@@ -107,23 +107,33 @@ class MetadataResolver:
                 params={"query": title, "include_adult": "false"},
             )
             response.raise_for_status()
-            for candidate in response.json().get("results", [])[:5]:
-                name = candidate.get("name" if kind == "tv" else "title", "")
-                date = candidate.get("first_air_date" if kind == "tv" else "release_date", "")
+            candidates = {}
+            for candidate in response.json().get("results") or []:
+                name = candidate.get("name" if kind == "tv" else "title") or ""
+                date = candidate.get("first_air_date" if kind == "tv" else "release_date") or ""
                 poster = candidate.get("poster_path") or ""
                 if SequenceMatcher(None, title.casefold(), name.casefold()).ratio() < 0.95:
                     continue
                 if year and not date.startswith(str(year)):
                     continue
-                if not re.fullmatch(r"/[A-Za-z0-9_-]+\.jpg", poster):
+                identity = candidate.get("id")
+                if not isinstance(identity, int) or identity <= 0:
                     continue
-                image = await client.get(f"https://image.tmdb.org/t/p/w500{poster}")
-                image.raise_for_status()
-                if len(image.content) > 8_000_000 or not image.content.startswith(b"\xff\xd8"):
-                    raise ValueError("Invalid poster image")
-                with (folder / "poster.jpg").open("xb") as output:
-                    output.write(image.content)
-                return True
+                candidates[identity] = poster
+            # A title alone can name several remakes. Never make the first search
+            # result into a local poster, which library scanners prefer thereafter.
+            if len(candidates) != 1:
+                return False
+            poster = next(iter(candidates.values()))
+            if not re.fullmatch(r"/[A-Za-z0-9_-]+\.jpg", poster):
+                return False
+            image = await client.get(f"https://image.tmdb.org/t/p/w500{poster}")
+            image.raise_for_status()
+            if len(image.content) > 8_000_000 or not image.content.startswith(b"\xff\xd8"):
+                raise ValueError("Invalid poster image")
+            with (folder / "poster.jpg").open("xb") as output:
+                output.write(image.content)
+            return True
         return False
 
     async def resolve(self, disc_name: str, titles=()) -> MetadataMatch:
@@ -167,7 +177,7 @@ class MetadataResolver:
                     params=params,
                 )
                 response.raise_for_status()
-                results = response.json().get("results", [])
+                results = response.json().get("results") or []
         except (httpx.HTTPError, ValueError, TypeError):
             return fallback
 
@@ -176,10 +186,16 @@ class MetadataResolver:
             media_type = candidate.get("media_type")
             if media_type not in {"movie", "tv"}:
                 continue
-            if source == "season marker" and media_type != "tv":
+            if kind == "tv" and media_type != "tv":
                 continue
             name = candidate.get("name" if media_type == "tv" else "title") or ""
             date = candidate.get("first_air_date" if media_type == "tv" else "release_date") or ""
+            # Automatic publication requires a real provider identity and release
+            # year; an incomplete search record is only a review suggestion.
+            if not isinstance(candidate.get("id"), int) or candidate["id"] <= 0:
+                continue
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+                continue
             score = SequenceMatcher(None, title.casefold(), name.casefold()).ratio()
             if score < 0.9 or (year and not date.startswith(str(year))):
                 continue

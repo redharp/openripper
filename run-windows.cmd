@@ -17,7 +17,15 @@ if not exist "%OPENRIPPER_MAKEMKV_BIN%" (
 )
 if not defined OPENRIPPER_LIBRARY_ROOT set "OPENRIPPER_LIBRARY_ROOT=%~dp0library"
 if not defined OPENRIPPER_DATABASE_URL (
-  set "OPENRIPPER_DATABASE_URL=sqlite:///%~dp0data\openripper.db"
+  rem Keep existing history when an installation predates the app rename.
+  rem Opening the legacy database in place avoids moving a live SQLite file.
+  if exist "data\openripper.db" (
+    set "OPENRIPPER_DATABASE_URL=sqlite:///%~dp0data\openripper.db"
+  ) else if exist "data\disc-goblin.db" (
+    set "OPENRIPPER_DATABASE_URL=sqlite:///%~dp0data\disc-goblin.db"
+  ) else (
+    set "OPENRIPPER_DATABASE_URL=sqlite:///%~dp0data\openripper.db"
+  )
 )
 if not defined OPENRIPPER_POLL_INTERVAL set "OPENRIPPER_POLL_INTERVAL=5"
 echo Starting OpenRipper. Open http://localhost:8080 and choose Settings to set the destination.

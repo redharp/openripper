@@ -14,7 +14,7 @@ from typing import Any
 from .config import Settings
 from .db import Database, now_iso
 from .discovery import optical_hotplug_events, optical_media_labels
-from .episodes import episode_code, validate_assignments
+from .episodes import check_existing_episodes, episode_code, validate_assignments
 from .handbrake import encode
 from .integrations import Handoffs
 from .makemkv import (
@@ -43,6 +43,23 @@ def stage_bytes(stage: Path) -> int:
         with suppress(OSError):
             total += candidate.stat().st_size
     return total
+
+
+def movie_selection_error(titles: list[dict]) -> str:
+    """Hold plausible additional features instead of silently labeling them extras."""
+    durations = sorted(
+        (title["duration_seconds"] for title in titles if title["selected"]), reverse=True
+    )
+    if len(durations) > 1 and (
+        any(duration <= 0 for duration in durations)
+        or any(duration >= 3600 or duration >= durations[0] * 0.75 for duration in durations[1:])
+    ):
+        return (
+            "Multiple possible movie features: select only the intended main feature "
+            "and short extras before publishing. Other files stay in staging; "
+            "alternate cuts, parts and separate movies need their own naming."
+        )
+    return ""
 
 
 class RipperService:
@@ -258,8 +275,10 @@ class RipperService:
 
     def staging_folder(self, drive_id: str, media_type: str, job_id: str) -> Path:
         root = self.media_root(drive_id, media_type)
-        # TV is held beside its library folder, never inside the watched TV tree.
-        if media_type == "tv":
+        # Library publication supports a cross-filesystem copy; raw disc-folder
+        # completion requires staging on the destination filesystem for rename.
+        # Existing jobs continue using their recorded stage_path.
+        if media_type == "tv" or self.settings.output_mode == "library":
             root = root.parent
         return root / ".openripper-staging" / job_id
 
@@ -386,7 +405,11 @@ class RipperService:
             if not selected:
                 raise MakeMKVError("No titles passed the configured selection rules")
             # Bonus titles are optional; never add short material to an episode cluster.
-            if self.settings.include_extras and len(selected) == 1:
+            if (
+                self.settings.include_extras
+                and (media_type or match.media_type) != "tv"
+                and len(selected) == 1
+            ):
                 selected_indexes = {title.index for title in selected}
                 for title in unique_titles(titles):
                     if title.index not in selected_indexes and (
@@ -586,6 +609,10 @@ class RipperService:
             await self.hold_tv_job(job_id)
         elif self.settings.output_mode == "disc":
             await self.complete_disc(job_id)
+        elif reason := movie_selection_error(job["titles"]):
+            self.database.update_job(job_id, status="needs_review", error=reason)
+            self.database.add_event(reason, job_id=job_id, level="warning")
+            await self.broadcast()
         elif can_publish:
             await self.publish_job(job_id)
         else:
@@ -697,6 +724,11 @@ class RipperService:
             raise ValueError("This job has no completed title files to publish")
         if not job["title"]:
             raise ValueError("A title is required before publishing")
+        if job["media_type"] == "movie":
+            if reason := movie_selection_error(job["titles"]):
+                raise ValueError(reason)
+            if any(t["selected"] and not t["ripped_path"] for t in job["titles"]):
+                raise ValueError("All selected movie titles must finish ripping before publishing")
         assignments = {}
         if job["media_type"] == "tv":
             assignments = validate_assignments(job["titles"], job.get("episode_assignments"))
@@ -761,7 +793,7 @@ class RipperService:
                         job_id=job_id,
                         year=job["year"] or 0,
                         year_suffix=f" ({job['year']})" if job["year"] else "",
-                        edition_suffix=f" {{edition-{clean_component(job['edition'])}}}"
+                        edition_suffix=f" - {{edition-{clean_component(job['edition'])}}}"
                         if job["edition"]
                         else "",
                         season=assignment["season"] if assignments else 1,
@@ -779,6 +811,7 @@ class RipperService:
                 name = destination.stem
                 name = name.replace(first, code) if first in name else f"{name} - {code}"
                 destination = destination.with_name(name + ".mkv")
+                check_existing_episodes(destination.parent, assignment, source)
             if destination.exists() and source != destination:
                 raise FileExistsError(f"Refusing to overwrite {destination}")
             if any(target == destination for _, _, target in plan):
@@ -789,6 +822,8 @@ class RipperService:
         await self.broadcast()
         for title, source, destination in plan:
             destination.parent.mkdir(parents=True, exist_ok=True)
+            if assignments:
+                check_existing_episodes(destination.parent, assignments[title["id"]], source)
             if source != destination:
                 if destination.exists():
                     raise FileExistsError(f"Refusing to overwrite {destination}")
@@ -815,6 +850,10 @@ class RipperService:
                     raise OSError("Published copy size differs from the staged video")
                 if destination.exists():
                     raise FileExistsError(f"Refusing to overwrite {destination}")
+                if assignments:
+                    check_existing_episodes(
+                        destination.parent, assignments[title["id"]], temporary
+                    )
                 temporary.rename(destination)
                 self.database.execute(
                     "UPDATE titles SET ripped_path=? WHERE id=?", (str(destination), title["id"])
