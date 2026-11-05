@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
 
 
@@ -48,47 +49,41 @@ def windows_media_labels() -> dict[str, str]:
     return parse_windows_media(result.stdout)
 
 
+def linux_disc_loaded(device: str) -> bool:
+    """Ask the drive, not cached block capacity or udev properties, about media."""
+    try:
+        import fcntl
+
+        descriptor = os.open(device, os.O_RDONLY | os.O_NONBLOCK)
+    except (ImportError, OSError):
+        return False
+    try:
+        # linux/cdrom.h: CDROM_DRIVE_STATUS, CDSL_CURRENT, CDS_DISC_OK.
+        # O_NONBLOCK allows querying an empty/open tray without closing it.
+        return fcntl.ioctl(descriptor, 0x5326, 0x7FFFFFFF) == 4
+    except OSError:
+        # Not ready, unsupported ioctls and permission failures are not media.
+        return False
+    finally:
+        with suppress(OSError):
+            os.close(descriptor)
+
+
 def optical_media_labels() -> dict[str, str]:
     """Return loaded optical media labels keyed by device (/dev/sr* or a drive letter)."""
     if os.name == "nt":
         return windows_media_labels()
 
-    context = None
-    try:
-        import pyudev
-
-        context = pyudev.Context()
-    except (ImportError, OSError):
-        pass
-
     labels: dict[str, str] = {}
-    if context is not None:
-        for device in context.list_devices(subsystem="block"):
-            name = device.device_node or ""
-            if not name.startswith("/dev/sr"):
-                continue
-            label = str(device.get("ID_FS_LABEL", "")).strip()
-            if device.get("ID_CDROM_MEDIA") == "1":
-                labels[name] = label or f"DISC_{device.sys_name}"
-
     for device in Path("/dev").glob("sr*"):
         name = str(device)
-        if name in labels:
+        if not re.fullmatch(r"sr\d+", device.name) or not linux_disc_loaded(name):
             continue
-        media_blocks = 0
-        try:
-            media_blocks = int(
-                (Path("/sys/class/block") / device.name / "size")
-                .read_text(encoding="utf-8")
-                .strip()
-            )
-            if media_blocks <= 0:
-                continue
-        except (OSError, ValueError):
-            pass
         try:
             result = subprocess.run(
-                ["blkid", name],
+                # Low-level probing bypasses the blkid cache, which may still
+                # describe an earlier disc. Udev labels can be stale too.
+                ["blkid", "-p", name],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -96,8 +91,10 @@ def optical_media_labels() -> dict[str, str]:
             )
         except (OSError, subprocess.TimeoutExpired):
             continue
-        label = parse_blkid_label(result.stdout)
-        if label or media_blocks > 0:
+        label = parse_blkid_label(result.stdout) if result.returncode == 0 else ""
+        # A user may eject the disc during the label probe. Unlabelled loaded
+        # media is valid, but only another positive drive-status check proves it.
+        if linux_disc_loaded(name):
             labels[name] = label or f"DISC_{device.name}"
     return labels
 
