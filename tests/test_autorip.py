@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +34,7 @@ class FastBackend(SimulationBackend):
 
 def make_service(tmp_path, **overrides):
     root = tmp_path / "library"
+    overrides.setdefault("output_mode", "disc")
     settings = Settings(
         library_root=root,
         movie_root=root / "Movies",
@@ -51,6 +53,193 @@ def make_service(tmp_path, **overrides):
 
 async def finish(service):
     await asyncio.gather(*list(service._tasks.values()))
+
+
+@pytest.mark.asyncio
+async def test_enabling_automatic_ripping_starts_a_persisted_waiting_disc_once(tmp_path):
+    service = make_service(tmp_path, auto_rip=False, eject_on_success=False)
+    await service.poll_once()
+    (waiting,) = service.overview()["active_jobs"]
+    assert waiting["status"] == "awaiting_start"
+
+    # Recreate the service before enabling automation to exercise the persisted job.
+    service = RipperService(service.settings, service.database, service.backend)
+    service.settings.auto_rip = True
+    await service.poll_once()
+    await finish(service)
+    await service.poll_once()
+    (completed,) = service.overview()["history"]
+    assert completed["id"] == waiting["id"]
+    assert completed["status"] == "complete"
+    assert not service.overview()["active_jobs"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["failure", "cancel", "empty"])
+async def test_retry_publishes_only_complete_titles(tmp_path, monkeypatch, interruption):
+    service = make_service(tmp_path, rip_mode="all")
+    interrupted = asyncio.Event()
+    attempts = []
+
+    async def scan(device):
+        return [TitleInfo(index=i, duration_seconds=7200 - i) for i in range(2)]
+
+    async def rip(device, title_index, destination, progress):
+        attempts.append(title_index)
+        destination.mkdir(parents=True, exist_ok=True)
+        output = destination / f"title{title_index}.mkv"
+        if attempts == [0, 1]:
+            output.write_bytes(b"" if interruption == "empty" else b"partial")
+            interrupted.set()
+            if interruption == "cancel":
+                await asyncio.Future()
+            if interruption == "failure":
+                raise MakeMKVError("Read failed")
+            return output
+        assert not output.exists()
+        output.write_bytes(f"complete title {title_index}".encode())
+        return output
+
+    monkeypatch.setattr(service.backend, "scan_disc", scan)
+    monkeypatch.setattr(service.backend, "rip_title", rip)
+    await service.poll_once()
+    job_id = service.database.fetchone("SELECT id FROM jobs")["id"]
+    await asyncio.wait_for(interrupted.wait(), 5)
+    if interruption == "cancel":
+        await service.cancel_job(job_id)
+    await finish(service)
+    job = service.database.job_detail(job_id)
+    assert job["status"] == ("cancelled" if interruption == "cancel" else "failed")
+    assert not job["titles"][1]["ripped_path"]
+
+    # Older releases could leave unidentified output directly in the staging folder.
+    legacy_partial = Path(job["stage_path"]) / "orphan.mkv"
+    legacy_partial.write_bytes(b"legacy partial")
+    await service.retry_job(job_id)
+    await finish(service)
+    job = service.database.job_detail(job_id)
+    assert job["status"] == "complete", job["error"]
+    assert attempts == [0, 1, 1]
+    folder = Path(job["final_path"])
+    assert {p.name: p.read_bytes() for p in folder.glob("*.mkv")} == {
+        "title0.mkv": b"complete title 0",
+        "title1.mkv": b"complete title 1",
+    }
+    retained = [p.read_bytes() for p in folder.parent.rglob("*.mkv") if folder not in p.parents]
+    assert b"legacy partial" in retained
+    assert (b"" if interruption == "empty" else b"partial") in retained
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_a_different_disc_with_the_same_label(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+
+    async def fail(*args):
+        raise MakeMKVError("Read failed")
+
+    monkeypatch.setattr(service.backend, "rip_title", fail)
+    await service.poll_once()
+    await finish(service)
+    job_id = service.database.fetchone("SELECT id FROM jobs")["id"]
+    assert service.database.job_detail(job_id)["status"] == "failed"
+
+    async def scan(device):
+        return [TitleInfo(index=0, duration_seconds=900)]
+
+    rip_calls = []
+
+    async def rip(*args):
+        rip_calls.append(args)
+
+    monkeypatch.setattr(service.backend, "scan_disc", scan)
+    monkeypatch.setattr(service.backend, "rip_title", rip)
+    await service.retry_job(job_id)
+    await finish(service)
+    job = service.database.job_detail(job_id)
+    assert job["status"] == "failed"
+    assert "Insert the original disc" in job["error"]
+    assert not rip_calls
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_queued_task_starts(tmp_path):
+    service = make_service(tmp_path)
+    await service.poll_once()
+    job_id = service.database.fetchone("SELECT id FROM jobs")["id"]
+    await service.cancel_job(job_id)
+    assert service.database.job_detail(job_id)["status"] == "cancelled"
+    assert not list(tmp_path.rglob("*.mkv"))
+
+
+@pytest.mark.asyncio
+async def test_rip_checks_free_space_before_reading_video(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    service.settings.simulate = False
+
+    async def scan(device):
+        return [TitleInfo(index=0, duration_seconds=7200, size_bytes=1_000)]
+
+    async def rip(*args):
+        pytest.fail("The rip started even though it would not fit")
+
+    monkeypatch.setattr("openripper.service.optical_media_labels", lambda: {})
+    monkeypatch.setattr(
+        "openripper.service.shutil.disk_usage", lambda path: SimpleNamespace(free=100)
+    )
+    monkeypatch.setattr(service.backend, "scan_disc", scan)
+    monkeypatch.setattr(service.backend, "rip_title", rip)
+    await service.poll_once()
+    await finish(service)
+    job = service.overview()["history"][0]
+    assert job["status"] == "failed"
+    assert "No space left" in job["error"]
+    assert service.settings.movie_root.as_posix() in job["error"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_video_is_retained_without_publication(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    service.settings.simulate = False
+
+    async def verify(executable, output):
+        assert output.read_bytes() == b"test video contents"
+        raise ValueError("Output verification failed")
+
+    monkeypatch.setattr("openripper.service.optical_media_labels", lambda: {})
+    monkeypatch.setattr("openripper.service.shutil.which", lambda _: "ffmpeg")
+    monkeypatch.setattr("openripper.service.verify_video", verify)
+    await service.poll_once()
+    await finish(service)
+    summary = service.overview()["history"][0]
+    job = service.database.job_detail(summary["id"])
+    assert job["status"] == "failed"
+    assert "Output verification failed" in job["error"]
+    assert not job["titles"][0]["ripped_path"]
+    assert not job["final_path"]
+    (retained,) = service.settings.movie_root.rglob("*.mkv")
+    assert retained.read_bytes() == b"test video contents"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_artwork_keeps_completed_rip(tmp_path, monkeypatch):
+    service = make_service(tmp_path, artwork_enabled=True)
+    service.settings.tmdb_token = "test"
+    entered = asyncio.Event()
+
+    async def save_poster(*args):
+        entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(service.metadata, "save_poster", save_poster)
+    await service.poll_once()
+    job_id = service.database.fetchone("SELECT id FROM jobs")["id"]
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+    finally:
+        await service.stop()
+    job = service.database.job_detail(job_id)
+    assert job["status"] == "complete"
+    assert Path(job["titles"][0]["ripped_path"]).read_bytes() == b"test video contents"
 
 
 @pytest.mark.asyncio

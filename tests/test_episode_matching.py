@@ -1,9 +1,11 @@
 import errno
 from pathlib import Path
 
+import httpx
 import pytest
 from test_autorip import finish, make_service
 
+from openripper.api import create_app
 from openripper.db import Database
 from openripper.episodes import named_episodes, validate_assignments
 from openripper.makemkv import TitleInfo
@@ -72,6 +74,49 @@ async def test_tv_disc_completion_cannot_bypass_matching(tmp_path):
     with pytest.raises(ValueError, match="Match every selected"):
         await service.publish_job(job["id"])
     assert Path(job["titles"][0]["ripped_path"]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_tv_artwork_prefers_show_poster_then_episode_frame(tmp_path, monkeypatch):
+    service, job = await staged_tv(tmp_path, artwork_enabled=True)
+    service.settings.simulate = False  # Use fake thumbnail extraction for the staged fixture.
+    service.settings.tmdb_token = "test"
+    show = service.settings.tv_root / "Example Show (2024)"
+
+    async def save_poster(folder, title, year, kind):
+        assert (folder, title, year, kind) == (show, "Example Show", 2024, "tv")
+        (folder / "poster.jpg").write_bytes(b"poster")
+        return True
+
+    async def save_thumbnail(executable, source, destination, duration):
+        assert source.read_bytes() == b"test video contents"
+        destination.write_bytes(b"thumbnail")
+        return True
+
+    monkeypatch.setattr(service.metadata, "save_poster", save_poster)
+    monkeypatch.setattr("openripper.service.shutil.which", lambda _: "ffmpeg")
+    monkeypatch.setattr("openripper.service.save_thumbnail", save_thumbnail)
+    result = await match(
+        service, job, [dict(title_id=job["titles"][0]["id"], season=2, episode=1)]
+    )
+    assert result["status"] == "complete"
+    season = show / "Season 02"
+    assert (season / "Example Show - S02E01-thumb.jpg").read_bytes() == b"thumbnail"
+    assert not (season / "poster.jpg").exists()
+
+    app = create_app(service.settings, service.backend)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://openripper.test"
+    ) as client:
+        url = f"/api/jobs/{job['id']}/artwork"
+        assert (await client.get(url)).content == b"poster"
+        (show / "poster.jpg").unlink()
+        (season / "poster.jpg").write_bytes(b"legacy poster")
+        assert (await client.get(url)).content == b"legacy poster"
+        (season / "poster.jpg").unlink()
+        response = await client.get(url)
+        assert response.headers["content-type"] == "image/jpeg"
+        assert response.content == b"thumbnail"
 
 
 @pytest.mark.parametrize(
@@ -147,7 +192,7 @@ async def test_rejected_mapping_does_not_change_metadata_or_selection(tmp_path):
 
 @pytest.mark.asyncio
 async def test_new_disc_can_use_drive_while_previous_tv_waits(tmp_path):
-    service, job = await staged_tv(tmp_path)
+    service, job = await staged_tv(tmp_path, output_mode="disc")
     service.backend.label = "NEXT_MOVIE"
     await service.poll_once()
     await finish(service)
@@ -203,11 +248,42 @@ async def test_cross_filesystem_copy_keeps_original_until_promotion(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_interrupted_cross_filesystem_copy_can_be_retried(tmp_path, monkeypatch):
+    service, job = await staged_tv(tmp_path)
+    source = Path(job["titles"][0]["ripped_path"])
+    original_rename = Path.rename
+    destination = service.settings.tv_root / "Example Show (2024)" / "Season 01"
+    destination.mkdir(parents=True)
+    stale = destination / f"Example Show - S01E02.mkv.{job['id']}.pending"
+    stale.write_bytes(b"partial copy left by a previous service")
+    assignments = [dict(title_id=job["titles"][0]["id"], season=1, episode=2)]
+
+    def cross_device(path, target):
+        if path == source:
+            raise OSError(errno.EXDEV, "Cross-device rename")
+        return original_rename(path, target)
+
+    def broken_copy(source, temporary):
+        temporary.write_bytes(b"partial copy")
+        raise OSError("Network share disconnected")
+
+    monkeypatch.setattr(Path, "rename", cross_device)
+    with monkeypatch.context() as patch:
+        patch.setattr("openripper.service.shutil.copyfile", broken_copy)
+        with pytest.raises(OSError, match="Network share disconnected"):
+            await match(service, job, assignments)
+    assert list(destination.iterdir()) == [stale]
+    assert source.read_bytes() == b"test video contents"
+    assert service.database.job_detail(job["id"])["status"] == "needs_review"
+
+    result = await match(service, job, assignments)
+    assert result["status"] == "complete"
+    assert Path(result["titles"][0]["ripped_path"]).read_bytes() == b"test video contents"
+    assert stale.read_bytes() == b"partial copy left by a previous service"
+
+
+@pytest.mark.asyncio
 async def test_metadata_api_requires_assignments_and_accepts_typed_mapping(tmp_path):
-    import httpx
-
-    from openripper.api import create_app
-
     service, job = await staged_tv(tmp_path)
     app = create_app(service.settings, service.backend)
     payload = dict(media_type="tv", title="Example Show", year=2024)

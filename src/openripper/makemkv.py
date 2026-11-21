@@ -15,6 +15,12 @@ from .compatibility import CompatibilityInfo, parse_compatibility_info
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 
+CAPTURE_CHUNK_BYTES = 64 * 1024
+CAPTURE_LIMIT_BYTES = 16 * 1024 * 1024
+DISC_SCAN_TIMEOUT = 600
+DISCOVERY_TIMEOUT = 30
+COMPATIBILITY_TIMEOUT = 45
+
 
 async def stop_process(process: asyncio.subprocess.Process) -> None:
     """Terminate a child process and escalate to kill if it does not exit."""
@@ -197,6 +203,34 @@ def makemkv_failure(messages: list[str], fallback: str) -> str:
     return f"{fallback}\n{tail}" if tail else fallback
 
 
+def capture_failure(output: bytearray, reason: str) -> MakeMKVError:
+    # A stuck drive can repeat one warning thousands of times. Keep the most
+    # recent distinct lines, and cap their combined size before storing an error.
+    tail = output[-8192:]
+    lines = tail.decode(errors="replace").splitlines()
+    if len(output) > len(tail) and lines:
+        lines.pop(0)
+    if len(lines) > 1 and not output.endswith((b"\n", b"\r")):
+        lines.pop()
+    distinct = list(dict.fromkeys(reversed(lines)))[:12]
+    return MakeMKVError(makemkv_failure([line[:640] for line in reversed(distinct)], reason))
+
+
+async def _stop_capture(process: asyncio.subprocess.Process, stream: asyncio.StreamReader) -> None:
+    # A paused pipe still needs a consumer when the process is terminated.
+    # In particular, Windows may not unblock process.wait() until it sees EOF.
+    async def discard() -> None:
+        while await stream.read(CAPTURE_CHUNK_BYTES):
+            pass
+
+    drain = asyncio.create_task(discard())
+    try:
+        await stop_process(process)
+    finally:
+        drain.cancel()
+        await asyncio.gather(drain, return_exceptions=True)
+
+
 def fingerprint_disc(disc_name: str, titles: list[TitleInfo]) -> str:
     signature = "|".join(
         f"{title.index}:{title.duration_seconds}:{title.size_bytes}:{title.playlist}"
@@ -262,7 +296,7 @@ def choose_titles(
         return []
     if mode == "all":
         selected = eligible
-    elif mode == "main_feature":
+    elif mode == "main_feature" or media_type == "movie":
         selected = [max(eligible, key=lambda item: item.duration_seconds)]
     else:
         episode_like = [title for title in eligible if 18 * 60 <= title.duration_seconds <= 95 * 60]
@@ -299,6 +333,8 @@ class MakeMKVBackend:
     async def _capture(
         self,
         *arguments: str,
+        operation: str,
+        timeout: float,
         allow_failure: bool = False,
         accept_successful_title_scan: bool = False,
     ) -> str:
@@ -312,10 +348,27 @@ class MakeMKVBackend:
             )
         except FileNotFoundError as exc:
             raise MakeMKVError(f"{self.binary} was not found") from exc
+        stream = process.stdout
+        assert stream is not None
+        stdout = bytearray()
         try:
-            stdout, _ = await process.communicate()
-        except asyncio.CancelledError:
-            await stop_process(process)
+            async with asyncio.timeout(timeout):
+                while chunk := await stream.read(CAPTURE_CHUNK_BYTES):
+                    stdout.extend(chunk)
+                    if len(stdout) > CAPTURE_LIMIT_BYTES:
+                        raise capture_failure(
+                            stdout,
+                            f"MakeMKV {operation} produced too much output. Check the disc "
+                            "and drive before retrying.",
+                        )
+                await process.wait()
+        except TimeoutError as exc:
+            await _stop_capture(process, stream)
+            raise capture_failure(
+                stdout, f"MakeMKV {operation} timed out after {timeout:g} seconds."
+            ) from exc
+        except BaseException:
+            await _stop_capture(process, stream)
             raise
         output = stdout.decode(errors="replace")
         accepted_nonzero_scan = accept_successful_title_scan and successful_title_scan(output)
@@ -326,7 +379,14 @@ class MakeMKVBackend:
 
     async def list_drives(self) -> list[DriveInfo]:
         output = await self._capture(
-            "--robot", "--cache=1", "--noscan", "info", "disc:9999", allow_failure=True
+            "--robot",
+            "--cache=1",
+            "--noscan",
+            "info",
+            "disc:9999",
+            operation="drive discovery",
+            timeout=DISCOVERY_TIMEOUT,
+            allow_failure=True,
         )
         return parse_drives(output)
 
@@ -338,6 +398,8 @@ class MakeMKVBackend:
             "--noscan",
             "info",
             f"dev:{device}",
+            operation="disc scan",
+            timeout=DISC_SCAN_TIMEOUT,
             accept_successful_title_scan=True,
         )
         titles = parse_titles(output)
@@ -447,7 +509,9 @@ class MakeMKVBackend:
         if self.sdf_path and self.sdf_path.is_file():
             arguments.extend(["-f", str(self.sdf_path)])
         arguments.extend(["-d", device, "--info"])
-        output = await self._capture(*arguments)
+        output = await self._capture(
+            *arguments, operation="drive compatibility check", timeout=COMPATIBILITY_TIMEOUT
+        )
         sysfs = Path("/sys/class/block") / Path(device).name / "device"
 
         def read_identity(name: str) -> str:

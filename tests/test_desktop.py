@@ -15,9 +15,11 @@ def clean_environment(monkeypatch):
             monkeypatch.delenv(key)
 
 
-def test_desktop_defaults_are_private_and_paused(tmp_path):
+def test_desktop_defaults_are_private_and_automatic(tmp_path):
     settings = desktop_settings(tmp_path)
-    assert not settings.auto_rip
+    assert settings.auto_rip
+    assert settings.output_mode == "library"
+    assert settings.artwork_enabled
     assert not settings.udev_discovery
     assert settings.preferences_path == tmp_path / "preferences.json"
     assert str(tmp_path.as_posix()) in settings.database_url

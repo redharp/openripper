@@ -64,6 +64,8 @@ def test_clear_failures_keeps_files_and_does_not_touch_running_jobs(tmp_path):
         assert overview["active_jobs"][0]["status"] == "awaiting_start"
         assert db.job_detail("bad1") is not None
         assert partial.read_bytes() == b"keep these bytes"
+    # Windows cannot move an SQLite database while a pooled connection is open.
+    (tmp_path / "test.db").rename(tmp_path / "closed.db")
 
 
 def test_drives_show_compatibility_and_flashing_is_gone(tmp_path) -> None:

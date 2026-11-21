@@ -94,6 +94,29 @@ def test_environment_sets_default_media_roots(tmp_path, monkeypatch):
     assert settings.tv_root == tmp_path / "library" / "TV"
 
 
+def test_library_automation_defaults_preserve_existing_choices(tmp_path, monkeypatch):
+    preferences = tmp_path / "preferences.json"
+    monkeypatch.setenv("OPENRIPPER_PREFERENCES_PATH", str(preferences))
+    for name in ("AUTO_RIP", "OUTPUT_MODE", "ARTWORK_ENABLED", "FFMPEG_BIN"):
+        monkeypatch.delenv(f"OPENRIPPER_{name}", raising=False)
+    settings = Settings.from_env()
+    assert (settings.auto_rip, settings.output_mode, settings.artwork_enabled) == (
+        True, "library", True
+    )
+
+    preferences.write_text(json.dumps({
+        "auto_rip": False, "output_mode": "disc", "artwork_enabled": False,
+        "ffmpeg_bin": "custom-ffmpeg",
+    }))
+    settings = Settings.from_env()
+    assert (settings.auto_rip, settings.output_mode, settings.artwork_enabled) == (
+        False, "disc", False
+    )
+    assert settings.ffmpeg_bin == "custom-ffmpeg"
+    monkeypatch.setenv("OPENRIPPER_FFMPEG_BIN", "override-ffmpeg")
+    assert Settings.from_env().ffmpeg_bin == "override-ffmpeg"
+
+
 def test_cannot_change_destination_during_rip(tmp_path):
     settings = Settings(
         library_root=tmp_path / "library",

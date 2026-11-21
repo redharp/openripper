@@ -1175,8 +1175,8 @@ function renderPreferences(preferences) {
   $("#automation-status").classList.toggle("paused", !preferences.auto_rip);
   $("#output-description").textContent =
     preferences.output_mode === "disc"
-      ? "Movies save by disc. TV waits for episode matching."
-      : "Media library naming. Uncertain matches need review.";
+      ? "Movies save by disc. Identified TV episodes go to the TV library."
+      : "Identified movies and episodes go to the library. Uncertain matches need review.";
   $("#eject-description").textContent = preferences.eject_on_success
     ? "Eject after a successful rip."
     : "Keep the disc loaded after ripping.";
@@ -1360,9 +1360,11 @@ function loadAdvancedSettings(p, busy) {
   $("#alert-mode").value = localStorage.getItem("openripper-alerts") || "muted";
   api("/api/capabilities")
     .then((c) => {
-      $("#artwork-status").textContent = c.tmdb_configured
-        ? "TMDB token configured. Only confident title/year matches receive a poster."
-        : "TMDB token is not configured. Add it on the server before enabling artwork.";
+      const posters = c.tmdb_configured ? "TMDB is configured." : "Add a TMDB token for posters.";
+      const thumbnails = c.ffmpeg_available
+        ? "FFmpeg is available for episode thumbnails and movie previews."
+        : "Install FFmpeg on the server for local thumbnails.";
+      $("#artwork-status").textContent = `${posters} ${thumbnails}`;
       $("#handbrake-status").textContent = c.handbrake_available
         ? "Configured HandBrake CLI found on this server."
         : "Configured HandBrake CLI not found. Install it separately, then set the executable path.";

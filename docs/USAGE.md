@@ -37,17 +37,27 @@ in the JSON preferences file rather than environment variables. Concurrent jobs
 and automatic ripping can change while work is active; destination and content
 settings are locked until active jobs and pending reviews are resolved.
 
-With automatic ripping off, inserted discs appear under **Ready to start**.
+New installations start ripping on insertion, use **Library** naming, and
+enable artwork. Saved settings take precedence. With automatic ripping off,
+inserted discs appear under **Ready to start**.
 Media type defaults to **Auto**; check the destination and press **Start**.
 Use **Movie** or **TV show** only to override detection.
 They do not scan or rip until started, and still respect the slot limit. Removing
-the disc removes its waiting entry. Waiting entries survive a service restart.
+the disc removes its waiting entry. Waiting entries survive a service restart
+and begin automatically if automatic ripping is turned on while the disc is loaded.
 Explicit season markers (such as `EXAMPLE_SHOW_S1_D1`), episode labels and episode
 running-time clusters help identify TV. When a TMDB token is configured, lookup
-considers both movies and TV in either output mode; ambiguous matches are not
-treated as confirmed metadata. Movie and TV folders now apply in both output
-modes, including disc-folder mode. Per-drive roots contain Movies and TV folders.
+considers both movies and TV in either output mode. Choosing Movie or TV
+restricts metadata matches to that category. If a movie disc has a generic
+volume label, a single named feature can supply the search name.
+Ambiguous matches still require review in Library mode. Movie and TV folders
+apply in both output modes. Per-drive roots contain Movies and TV folders.
 Staging for new jobs stays alongside the selected destination.
+
+Without a TMDB token, Library mode can confirm a movie's title and year from
+an enabled Radarr library. It requires an exact title and matching feature
+runtime. A mastering suffix on a volume label is removed only when the
+remaining title is independently confirmed.
 
 Disc-folder mode defaults to `{disc}`: the disc name with filesystem-unsafe
 characters removed, without a job-ID suffix. Saved settings using the former
@@ -59,8 +69,10 @@ If a destination folder
 already exists, the new rip stays in staging and reports a conflict instead of
 overwriting it. This change does not rename previously completed folders.
 
-TV rips always wait at **Needs episode matching**, in either output mode.
-Choose **Match episodes**, confirm the show, and assign every selected file to
+TV publishes automatically when the show match is confident and scanned title
+names identify every selected episode without duplicates or conflicting
+season or episode numbers. For other rips, choose **Match episodes** at
+**Needs episode matching**, confirm the show, and assign every selected file to
 its actual season and episode. Search existing Sonarr shows to choose episode
 names from its catalog, or enter the details manually. A file containing several
 consecutive episodes can use the optional **Through** field. Extras can be
@@ -128,8 +140,9 @@ Important knobs:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OPENRIPPER_LIBRARY_ROOT` | `/media/library` | Base storage root; Movies and TV subfolders are the defaults |
-| `OPENRIPPER_OUTPUT_MODE` | `disc` | Unattended disc folders, or `library` for metadata-gated naming |
+| `OPENRIPPER_OUTPUT_MODE` | `library` | Canonical media library filenames, or `disc` for raw disc folders |
 | `OPENRIPPER_AUTO_RIP` | `true` | Start on insertion; when off, loaded discs wait for Start |
+| `OPENRIPPER_ARTWORK_ENABLED` | `true` | Generate available artwork for published rips |
 | `OPENRIPPER_MOVIE_ROOT` | `/media/library/Movies` | Movie destination in both output modes |
 | `OPENRIPPER_TV_ROOT` | `/media/library/TV` | TV destination in both output modes |
 | `OPENRIPPER_DATABASE_URL` | PostgreSQL DSN | Durable app state |
@@ -141,6 +154,33 @@ Important knobs:
 | `OPENRIPPER_UDEV_DISCOVERY` | `true` | Trigger immediate discovery on Linux hotplug events |
 | `OPENRIPPER_COMPATIBILITY_CHECK` | `true` | Read-only check showing whether each drive can rip 4K UHD |
 | `OPENRIPPER_SIMULATE` | `false` | Use two fake drives and a tiny fake rip |
+
+## Posters and thumbnails
+
+Control artwork in **Settings → Artwork → Save posters and video thumbnails**. With a
+TMDB token, OpenRipper downloads a poster for a confidently identified movie
+or show. Show posters are saved at the show level, above the season folders.
+
+With FFmpeg available, OpenRipper saves a frame beside each published episode
+as `<episode>-thumb.jpg`. A movie without a poster gets a `thumb.jpg` from
+the main feature. The dashboard prefers a poster and falls back to a generated
+frame. Existing image files are preserved. The Docker image includes FFmpeg.
+On Windows, install FFmpeg on the server's PATH, set `OPENRIPPER_FFMPEG_BIN`,
+or set `ffmpeg_bin` to the executable path in the JSON preferences file.
+
+## Storage and output checks
+
+Before ripping, OpenRipper checks that staging is writable and that available
+space covers the selected titles' estimated size when known. Cross-filesystem
+publication also checks the space required for the copy. An estimate does not
+reserve space against other writers. Check that network shares are mounted
+before starting the service.
+
+With FFmpeg available, new rips and HandBrake outputs must decode a first
+video frame before OpenRipper accepts them. This catches invalid files and
+missing video streams. It does not verify playback throughout a title. Set
+`OPENRIPPER_VERIFY_VIDEO=false` in the service environment to disable the
+decode check. Without FFmpeg, OpenRipper checks that the output is nonempty.
 
 ## Sonarr and Radarr naming
 
@@ -203,14 +243,20 @@ are sent in the link.
   another rip. After a restart, automatic ripping may process an inserted disc
   again; disable automation before restarting if you want to review it first.
 - Interrupted work is marked failed. Retry can reuse completed titles, but the
-  incomplete title starts again; this is not byte-level resume. Cancel and clear
-  preserve partial files.
+  incomplete title starts again in a fresh folder. Once a disc has been scanned,
+  Retry compares the scanned titles before reusing completed files or writing new
+  ones. Partial files and MakeMKV diagnostics are retained beside the job's staging
+  folder under `<job-id>.attempts`. The job detail API includes the retained path
+  in the event details. Cancel and Clear preserve those files.
+- A Library-mode movie rip that cannot publish automatically stays in
+  **Needs review**. Correct a naming conflict or restore access to the library,
+  then publish from review. The disc can be removed after the video is staged.
 - OpenRipper remuxes tracks through MakeMKV by default. Optional HandBrake
   encoding runs only when explicitly enabled in Settings.
 - Disc-folder mode uses the physical label without claiming a metadata match.
   Library mode holds uncertain naming for review.
-- TV episodes need explicit per-file matching. Sonarr supplies show and episode
-  names; it cannot identify anonymous disc tracks from their runtime alone.
+- TV episodes need an explicit identity from the title scan or manual matching.
+  Sonarr can supply show and episode names during review.
 - Use OpenRipper only for media you are legally permitted to copy in your
   jurisdiction.
 - MakeMKV is separate software with its own license and beta-key requirements.

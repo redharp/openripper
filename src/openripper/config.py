@@ -37,7 +37,7 @@ class Settings:
     compatibility_check: bool = True
     sdf_path: Path = Path("/opt/makemkv/appdata/sdf.bin")
     simulate: bool = False
-    output_mode: str = "disc"
+    output_mode: str = "library"
     preferences_path: Path = Path("config/openripper.json")
     drive_paths: dict[str, str] = field(default_factory=dict)
     disc_folder_template: str = "{disc}"
@@ -49,7 +49,9 @@ class Settings:
     subtitle_mode: str = "all"
     audio_mode: str = "all"
     preferred_languages: str = "eng"
-    artwork_enabled: bool = False
+    artwork_enabled: bool = True
+    ffmpeg_bin: str = "ffmpeg"
+    verify_video: bool = True
     handbrake_enabled: bool = False
     handbrake_bin: str = "HandBrakeCLI"
     handbrake_preset: str = "Fast 1080p30"
@@ -127,7 +129,10 @@ class Settings:
             compatibility_check=_bool("OPENRIPPER_COMPATIBILITY_CHECK", True),
             sdf_path=Path(_env("OPENRIPPER_SDF_PATH", "/opt/makemkv/appdata/sdf.bin")).expanduser(),
             simulate=_bool("OPENRIPPER_SIMULATE", False),
-            output_mode=_env("OPENRIPPER_OUTPUT_MODE", "disc"),
+            ffmpeg_bin=_env("OPENRIPPER_FFMPEG_BIN", "ffmpeg"),
+            verify_video=_bool("OPENRIPPER_VERIFY_VIDEO", True),
+            output_mode=_env("OPENRIPPER_OUTPUT_MODE", "library"),
+            artwork_enabled=_bool("OPENRIPPER_ARTWORK_ENABLED", True),
             preferences_path=Path(_env("OPENRIPPER_PREFERENCES_PATH", "config/openripper.json")),
         )
         if settings.preferences_path.is_file():
@@ -150,6 +155,9 @@ class Settings:
                     setattr(settings, name, preferences[name])
             settings.__post_init__()
             settings.integrations = preferences.get("integrations", {})
+            saved_ffmpeg = preferences.get("ffmpeg_bin")
+            if _env("OPENRIPPER_FFMPEG_BIN") is None and isinstance(saved_ffmpeg, str):
+                settings.ffmpeg_bin = saved_ffmpeg.strip() or settings.ffmpeg_bin
         from .arr import ArrConfig
 
         for provider in ("radarr", "sonarr"):

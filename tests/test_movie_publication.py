@@ -7,12 +7,16 @@ from openripper.makemkv import TitleInfo
 from openripper.metadata import MetadataMatch
 
 
-async def rip_movies(tmp_path, monkeypatch, durations, **settings):
+async def rip_movies(tmp_path, monkeypatch, durations, names=None, **settings):
     service = make_service(tmp_path, output_mode="library", rip_mode="all", **settings)
 
     async def scan(device):
         return [
-            TitleInfo(index=index, name=f"Track {index}", duration_seconds=duration)
+            TitleInfo(
+                index=index,
+                name=names[index] if names else f"Track {index}",
+                duration_seconds=duration,
+            )
             for index, duration in enumerate(durations)
         ]
 
@@ -23,7 +27,7 @@ async def rip_movies(tmp_path, monkeypatch, durations, **settings):
         await progress(1, "Done")
         return path
 
-    async def metadata(disc_name, titles):
+    async def metadata(disc_name, titles, *, media_type=None):
         return MetadataMatch("Example", 2020, confidence=0.99, source="tmdb")
 
     monkeypatch.setattr(service.backend, "scan_disc", scan)
@@ -68,6 +72,39 @@ async def test_movie_with_short_extra_can_publish(tmp_path, monkeypatch):
     folder = service.settings.movie_root / "Example (2020)"
     assert (folder / "Example (2020).mkv").read_bytes() == b"video-0"
     assert (folder / "Extras" / "Track 1.mkv").read_bytes() == b"video-1"
+
+
+@pytest.mark.asyncio
+async def test_movie_extras_with_equivalent_names_get_distinct_files(tmp_path, monkeypatch):
+    service, job = await rip_movies(
+        tmp_path, monkeypatch, [7200, 300, 400], names=["Feature", "Bonus", "BONUS"],
+        include_extras=True,
+    )
+    assert job["status"] == "complete", job["error"]
+    folder = service.settings.movie_root / "Example (2020)"
+    assert (folder / "Example (2020).mkv").read_bytes() == b"video-0"
+    assert (folder / "Extras" / "Bonus - t01.mkv").read_bytes() == b"video-1"
+    assert (folder / "Extras" / "BONUS - t02.mkv").read_bytes() == b"video-2"
+
+
+@pytest.mark.asyncio
+async def test_blocked_automatic_publication_can_be_reviewed_without_disc(tmp_path, monkeypatch):
+    existing = tmp_path / "library" / "Movies" / "Example (2020)" / "Example (2020).mkv"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"existing movie")
+
+    service, job = await rip_movies(tmp_path, monkeypatch, [7200])
+    assert job["status"] == "needs_review"
+    assert "Refusing to overwrite" in job["error"]
+    service.backend.label = ""
+    await service.poll_once()
+    result = await service.update_metadata(
+        job["id"], media_type="movie", title="Example", year=2020,
+        season=None, episode_start=None, edition="Director's Cut", selected_title_ids=None,
+    )
+    assert result["status"] == "complete"
+    assert existing.read_bytes() == b"existing movie"
+    assert Path(result["titles"][0]["ripped_path"]).read_bytes() == b"video-0"
 
 
 @pytest.mark.asyncio

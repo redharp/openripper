@@ -1,8 +1,15 @@
 import httpx
 import pytest
 
+from openripper.arr import ArrConfig
 from openripper.makemkv import TitleInfo
-from openripper.metadata import MetadataResolver, disc_media_type, disc_season, episode_structure
+from openripper.metadata import (
+    MetadataResolver,
+    disc_media_type,
+    disc_season,
+    episode_structure,
+    resolve_library_movie,
+)
 
 
 @pytest.mark.parametrize(
@@ -65,6 +72,191 @@ async def test_tv_metadata_lookup_and_ambiguous_names(monkeypatch):
     ambiguous = await resolver.resolve("EXAMPLE_SHOW")
     assert ambiguous.source == "disc-label"
     assert ambiguous.confidence < 0.88
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, year", [("movie", 2021), ("tv", 2020)])
+async def test_manual_category_limits_metadata_matches(monkeypatch, kind, year):
+    mock_metadata(monkeypatch, [
+        {"id": 1, "media_type": "tv", "name": "Example", "first_air_date": "2020-01-01"},
+        {"id": 2, "media_type": "movie", "title": "Example", "release_date": "2021-01-01"},
+    ])
+    match = await MetadataResolver("test").resolve("EXAMPLE", media_type=kind)
+    assert (match.media_type, match.year, match.source) == (kind, year, "tmdb")
+
+
+@pytest.mark.asyncio
+async def test_generic_volume_uses_a_single_named_feature(monkeypatch):
+    requests = mock_metadata(monkeypatch, [
+        {"id": 2, "media_type": "movie", "title": "Example Movie", "release_date": "2021-01-01"},
+    ])
+    titles = [
+        TitleInfo(index=0, name="Example Movie", duration_seconds=7200),
+        TitleInfo(index=1, name="MainFeature", duration_seconds=7200),
+        TitleInfo(index=2, name="Making Of", duration_seconds=400),
+    ]
+    match = await MetadataResolver("test").resolve("BLURAY_DISC", titles)
+    assert requests[-1].url.params["query"] == "Example Movie"
+    assert (match.title, match.year, match.source) == ("Example Movie", 2021, "tmdb")
+    titles[1].name = "Another Film"
+    match = await MetadataResolver("test").resolve("BLURAY_DISC", titles)
+    assert match.source == "disc-label"
+
+
+@pytest.mark.asyncio
+async def test_mastering_suffix_requires_corroborating_feature_name():
+    resolver = MetadataResolver()
+    feature = TitleInfo(index=0, name="Example Film", duration_seconds=5430)
+    match = await resolver.resolve("Example_Film_UPK76", [feature])
+    assert (match.title, match.year, match.source) == ("Example Film", None, "disc identity")
+    assert match.confidence >= 0.88
+
+    feature.name = "Other Film"
+    match = await resolver.resolve("Example_Film_UPK76", [feature])
+    assert match.confidence < 0.88
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "label, feature, duration, expected",
+    [
+        ("DUNE_PART_TWO_2024_UHD", "MainFeature", 9540, ("Dune Part Two", 2024)),
+        ("EXAMPLE_MOVIE", "Example Movie", 7200, ("Example Movie", None)),
+        ("EXAMPLE_MOVIE", "Example Movie (2020)", 7200, ("Example Movie", 2020)),
+        ("DVD_VIDEO", "Example Movie (2020)", 7200, ("Example Movie", 2020)),
+        ("EXAMPLE_MOVIE_2020", "Other Feature", 7200, None),
+        ("EXAMPLE_MOVIE_2020", "Example Movie (2018)", 7200, None),
+        ("EXAMPLE_MOVIE", "MainFeature", 7200, None),
+        ("DVD_VIDEO", "Example Movie", 7200, None),
+        ("DVD_VIDEO", "00001.mpls", 7200, None),
+        ("EXAMPLE_MOVIE_2020", "Example Movie", 1800, None),
+    ],
+)
+async def test_offline_movie_identity_requires_evidence(label, feature, duration, expected):
+    resolver = MetadataResolver()
+    match = await resolver.resolve(
+        label, [TitleInfo(index=0, name=feature, duration_seconds=duration)]
+    )
+    if expected is None:
+        assert match.confidence < 0.88
+    else:
+        assert match.media_type == "movie"
+        assert (match.title, match.year) == expected
+        assert match.source == "disc identity"
+        assert match.confidence >= 0.88
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "episode_titles, confident",
+    [
+        (["Example Show - S01E01", "EXAMPLE_SHOW_S01E02"], True),
+        (["S01E01", "S01E02"], False),
+        (["Example Show - S01E01", "Another Show - S01E02"], False),
+        (["Example Show (2021) S01E01", "Example Show S01E02"], False),
+    ],
+)
+async def test_offline_show_identity_requires_corroboration(episode_titles, confident):
+    episodes = [
+        TitleInfo(index=index, name=name, duration_seconds=2700)
+        for index, name in enumerate(episode_titles)
+    ]
+    match = await MetadataResolver().resolve("EXAMPLE_SHOW_2022_S01_D01", episodes)
+    assert (match.media_type, match.title, match.year) == ("tv", "Example Show", 2022)
+    assert (match.confidence >= 0.88) is confident
+
+
+@pytest.mark.asyncio
+async def test_offline_show_identity_does_not_invent_first_air_year():
+    episodes = [TitleInfo(index=0, name="Example Show S01E01", duration_seconds=2700)]
+    match = await MetadataResolver().resolve("EXAMPLE_SHOW_S01_D01", episodes)
+    assert (match.media_type, match.title, match.year) == ("tv", "Example Show", None)
+    assert match.confidence >= 0.88
+
+
+@pytest.mark.asyncio
+async def test_successful_but_ambiguous_catalog_lookup_holds_local_identity(monkeypatch):
+    mock_metadata(monkeypatch, [
+        {"id": 1, "media_type": "movie", "title": "Example", "release_date": "2020-01-01"},
+        {"id": 2, "media_type": "movie", "title": "Example", "release_date": "2020-02-01"},
+    ])
+    match = await MetadataResolver("test").resolve(
+        "EXAMPLE_2020",
+        [TitleInfo(index=0, name="Example", duration_seconds=7200)],
+    )
+    assert match.confidence < 0.88
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "label, feature, duration, other_title, result_year, queries",
+    [
+        ("EXAMPLE_MOVIE", "MainFeature", 5400, None, 2021, 1),
+        ("EXAMPLE_MOVIE_XYZ42", "Example Movie", 5400, None, 2021, 1),
+        ("EXAMPLE_MOVIE_XYZ42", "EXAMPLE_MOVIE_XYZ42", 5400, None, 2021, 1),
+        ("EXAMPLE_MOVIE_2021_XYZ42", "MainFeature", 5400, "Example Movie", 2021, 1),
+        ("EXAMPLE_MOVIE_2022_XYZ42", "MainFeature", 5400, None, None, 1),
+        ("EXAMPLE_MOVIE_XYZ42", "MainFeature", 5400, "Example Movie", None, 1),
+        ("EXAMPLE_MOVIE_XYZ42", "MainFeature", 5400, "Example Movie XYZ42", None, 1),
+        ("EXAMPLE_MOVIE_XYZ42", "MainFeature", 7000, None, None, 1),
+        ("EXAMPLE_MOVIE_XYZ42", "A different film", 5400, None, None, 0),
+        ("EXAMPLE_MOVIE_42", "MainFeature", 5400, None, None, 1),
+        ("EXAMPLE_MOVIE_S02_D01", "MainFeature", 5400, None, None, 0),
+    ],
+)
+async def test_managed_movie_lookup(
+    monkeypatch, label, feature, duration, other_title, result_year, queries
+):
+    movies = [{"id": 1, "title": "Example Movie", "year": 2021, "runtime": 90}]
+    if other_title:
+        movies.append({"id": 2, "title": other_title, "year": 1990, "runtime": 120})
+    calls = []
+
+    async def respond(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json=movies)
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        "openripper.arr.httpx.AsyncClient",
+        lambda **kw: original(transport=httpx.MockTransport(respond), **kw),
+    )
+    match = await resolve_library_movie(
+        label,
+        [TitleInfo(index=0, name=feature, duration_seconds=duration)],
+        ArrConfig(url="https://catalog.example.test", api_key="test-key"),
+    )
+    assert calls == [("GET", "/api/v3/movie")] * queries
+    if result_year is None:
+        assert match is None
+    else:
+        assert match is not None
+        assert (match.title, match.year) == ("Example Movie", result_year)
+        assert match.media_type == "movie"
+        assert match.source == "radarr"
+        assert match.confidence >= 0.88
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [502, "timeout", "incomplete"])
+async def test_managed_movie_lookup_returns_no_match_without_valid_evidence(monkeypatch, error):
+    async def respond(request):
+        if error == "timeout":
+            raise TimeoutError("lookup exceeded budget")
+        if error == "incomplete":
+            return httpx.Response(200, json=[{"id": 1, "title": "Example Movie", "year": 2021}])
+        return httpx.Response(error)
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        "openripper.arr.httpx.AsyncClient",
+        lambda **kw: original(transport=httpx.MockTransport(respond), **kw),
+    )
+    assert await resolve_library_movie(
+        "EXAMPLE_MOVIE_XYZ42",
+        [TitleInfo(index=0, name="MainFeature", duration_seconds=5400)],
+        ArrConfig(url="https://catalog.example.test", api_key="test-key"),
+    ) is None
 
 
 @pytest.mark.parametrize(

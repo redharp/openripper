@@ -4,17 +4,27 @@ import asyncio
 import errno
 import os
 import shutil
+import tempfile
 import time
 import uuid
+from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from .arr import ArrConfig
+from .artwork import poster_path, published_videos, save_thumbnail, thumbnail_path, verify_video
 from .config import Settings
 from .db import Database, now_iso
 from .discovery import optical_hotplug_events, optical_media_labels
-from .episodes import check_existing_episodes, episode_code, validate_assignments
+from .episodes import (
+    automatic_episode_assignments,
+    check_existing_episodes,
+    episode_code,
+    has_explicit_episode,
+    validate_assignments,
+)
 from .handbrake import encode
 from .integrations import Handoffs
 from .makemkv import (
@@ -28,7 +38,13 @@ from .makemkv import (
     fingerprint_disc,
     unique_titles,
 )
-from .metadata import MetadataResolver, disc_media_type, disc_season, disc_title
+from .metadata import (
+    MetadataResolver,
+    disc_media_type,
+    disc_season,
+    disc_title,
+    resolve_library_movie,
+)
 from .naming import clean_component, movie_destination, tv_destination
 from .output import render_name
 from .runtime import RipSlots, TransferMeter
@@ -43,6 +59,25 @@ def stage_bytes(stage: Path) -> int:
         with suppress(OSError):
             total += candidate.stat().st_size
     return total
+
+
+def _copy_for_publication(source: Path, temporary: Path) -> None:
+    try:
+        shutil.copyfile(source, temporary)
+    except OSError:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+        raise
+
+
+def _check_space(folder: Path, required: int) -> None:
+    free = shutil.disk_usage(folder).free
+    if required > free:
+        raise OSError(
+            errno.ENOSPC,
+            f"No space left: need {required:,} bytes, have {free:,}",
+            folder.as_posix(),
+        )
 
 
 def movie_selection_error(titles: list[dict]) -> str:
@@ -208,6 +243,8 @@ class RipperService:
                 data["online"] = True
                 self.database.upsert_drive(data)
                 if active_job:
+                    if active_job["status"] == "awaiting_start" and self.settings.auto_rip:
+                        await self.start_pending(active_job["id"], "auto")
                     continue
                 if self._media_labels.get(drive.id) != drive.disc_name:
                     self._seen_drives.discard(drive.id)
@@ -341,6 +378,8 @@ class RipperService:
             disc_name=row["disc_name"],
             state="ready",
         )
+        self._seen_drives.add(drive.id)
+        self._media_labels[drive.id] = drive.disc_name
         self.database.update_job(
             job_id,
             status="queued",
@@ -395,23 +434,49 @@ class RipperService:
                 (fingerprint, job_id),
             )
             self.database.update_job(job_id, fingerprint=fingerprint)
-            match = await self.metadata.resolve(drive.disc_name, titles)
+            match = await self.metadata.resolve(drive.disc_name, titles, media_type=media_type)
+            kind = media_type or match.media_type
+            if (
+                kind == "movie"
+                and self.settings.output_mode == "library"
+                and not self.settings.tmdb_token
+                and (match.year is None or match.confidence < self.settings.auto_publish_confidence)
+                and (radarr := self.settings.integrations.get("radarr", {})).get("enabled")
+            ):
+                catalog_match = await resolve_library_movie(
+                    drive.disc_name, titles, ArrConfig(**radarr)
+                )
+                if catalog_match:
+                    match = catalog_match
+            season = disc_season(drive.disc_name, titles) if kind == "tv" else None
             selected = choose_titles(
                 titles,
                 min_seconds=self.settings.min_title_seconds,
                 mode=self.settings.rip_mode,
-                media_type=media_type or match.media_type,
+                media_type=kind,
             )
             if not selected:
                 raise MakeMKVError("No titles passed the configured selection rules")
+            unique = unique_titles(titles)
+            if (
+                kind == "tv"
+                and self.settings.rip_mode == "smart"
+                and match.confidence >= self.settings.auto_publish_confidence
+            ):
+                for title in unique:
+                    if not title.selected and has_explicit_episode(
+                        title.name, season=season, disc_name=drive.disc_name
+                    ):
+                        title.selected = True
+                        selected.append(title)
             # Bonus titles are optional; never add short material to an episode cluster.
             if (
                 self.settings.include_extras
-                and (media_type or match.media_type) != "tv"
+                and kind != "tv"
                 and len(selected) == 1
             ):
                 selected_indexes = {title.index for title in selected}
-                for title in unique_titles(titles):
+                for title in unique:
                     if title.index not in selected_indexes and (
                         title.duration_seconds >= self.settings.extras_min_seconds
                     ):
@@ -419,7 +484,6 @@ class RipperService:
                         selected.append(title)
             self.database.replace_titles(job_id, [title.to_dict() for title in titles])
 
-            unique = unique_titles(titles)
             canonical = {content_key(t): t.index for t in unique if content_key(t) is not None}
             evidence = {
                 str(t.index): {
@@ -433,19 +497,15 @@ class RipperService:
             )
             self.database.update_job(
                 job_id,
-                media_type=media_type or match.media_type,
+                media_type=kind,
                 title=match.title,
                 year=match.year,
                 metadata_confidence=match.confidence,
-                season=disc_season(drive.disc_name, titles)
-                if (media_type or match.media_type) == "tv"
-                else None,
+                season=season,
                 status="queued",
-                stage_path=str(
-                    self.staging_folder(drive.id, media_type or match.media_type, job_id)
-                ),
+                stage_path=str(self.staging_folder(drive.id, kind, job_id)),
             )
-            detected_kind = "TV show" if (media_type or match.media_type) == "tv" else "Movie"
+            detected_kind = "TV show" if kind == "tv" else "Movie"
             detected_source = "manual override" if media_type else match.source
             self.database.add_event(
                 f"{detected_kind} detected from {detected_source}",
@@ -485,29 +545,41 @@ class RipperService:
             await self.broadcast()
             await self._rip(job_id, drive, selected)
         except asyncio.CancelledError:
-            self.database.update_job(
-                job_id,
-                status="cancelled",
-                error="Cancelled",
-                completed_at=now_iso(),
-            )
-            self.database.add_event("Job cancelled", job_id=job_id, level="warning")
-            await self.broadcast()
+            await self._record_ingest_end(job_id, "cancelled", "Cancelled")
             raise
         except Exception as exc:
-            self.database.update_job(
-                job_id,
-                status="failed",
-                error=str(exc),
-                completed_at=now_iso(),
-            )
-            self.database.add_event(str(exc), job_id=job_id, level="error")
-            await self.broadcast()
+            await self._record_ingest_end(job_id, "failed", str(exc))
+
+    async def _record_ingest_end(self, job_id: str, status: str, error: str) -> None:
+        job = self.database.fetchone("SELECT status FROM jobs WHERE id=?", (job_id,))
+        if job and job["status"] == "complete":
+            return
+        self.database.update_job(job_id, status=status, error=error, completed_at=now_iso())
+        self.database.add_event(
+            "Job cancelled" if status == "cancelled" else error,
+            job_id=job_id,
+            level="warning" if status == "cancelled" else "error",
+        )
+        await self.broadcast()
 
     async def _rip(self, job_id: str, drive: DriveInfo, selected_titles: list[TitleInfo]) -> None:
         current = self.database.job_detail(job_id)
         stage = Path(current["stage_path"]) if current else self.settings.staging_root / job_id
         stage.mkdir(parents=True, exist_ok=True)
+        completed = set()
+        for title in current["titles"] if current else ():
+            if title["ripped_path"]:
+                path = Path(title["ripped_path"])
+                if path.is_file() and path.stat().st_size:
+                    completed.add(title["title_index"])
+        if not self.settings.simulate:
+            with tempfile.TemporaryFile(dir=stage):
+                pass
+            estimate = sum(
+                title.size_bytes for title in selected_titles if title.index not in completed
+            )
+            if estimate > 0:
+                _check_space(stage, estimate)
         self.database.update_job(
             job_id,
             status="ripping",
@@ -516,23 +588,11 @@ class RipperService:
             stage_path=str(stage),
         )
         await self.broadcast()
+        attempts = stage.with_name(f"{stage.name}.attempts")
         meter = TransferMeter(time.monotonic(), stage_bytes(stage))
         expected_bytes = sum(title.size_bytes for title in selected_titles)
         for offset, title in enumerate(selected_titles):
-            recorded = self.database.job_detail(job_id)
-            completed = (
-                next(
-                    (
-                        item["ripped_path"]
-                        for item in recorded["titles"]
-                        if item["title_index"] == title.index and item["ripped_path"]
-                    ),
-                    "",
-                )
-                if recorded
-                else ""
-            )
-            if completed and Path(completed).is_file() and Path(completed).stat().st_size:
+            if title.index in completed:
                 continue
             reported_value = 0.0
 
@@ -554,19 +614,21 @@ class RipperService:
                 await self.broadcast()
 
             baseline_bytes = stage_bytes(stage)
+            attempts.mkdir(exist_ok=True)
+            attempt = Path(tempfile.mkdtemp(prefix=f"title-{title.index}-", dir=attempts))
             self._telemetry[job_id] = {
                 "title_number": offset + 1,
                 "title_count": len(selected_titles),
                 "title_name": title.name or f"Title {title.index}",
             }
             rip_task = asyncio.create_task(
-                self.backend.rip_title(drive.device, title.index, stage, report),
+                self.backend.rip_title(drive.device, title.index, attempt, report),
                 name=f"makemkv-{job_id}-{title.index}",
             )
             try:
                 while not rip_task.done():
                     await asyncio.wait({rip_task}, timeout=2)
-                    current_bytes = stage_bytes(stage)
+                    current_bytes = baseline_bytes + stage_bytes(attempt)
                     self._telemetry[job_id].update(
                         meter.sample(time.monotonic(), current_bytes, expected_bytes)
                     )
@@ -577,20 +639,44 @@ class RipperService:
                         await report(min(0.995, written / title.size_bytes), "Ripping title")
                     await self.broadcast()
                 output = await rip_task
+                if (
+                    output.parent != attempt
+                    or output.suffix.lower() != ".mkv"
+                    or not output.is_file()
+                    or not output.stat().st_size
+                ):
+                    raise MakeMKVError("Ripping finished without a non-empty MKV")
+                await self._verify_video(output)
+                staged = stage / output.name
+                if staged.exists():
+                    staged = stage / f"{output.stem} - t{title.index:02d}{output.suffix}"
+                if staged.exists():
+                    raise FileExistsError(f"Ripped title could not be staged: {staged.name}")
+                output.rename(staged)
+                self.database.execute(
+                    "UPDATE titles SET ripped_path=? WHERE job_id=? AND title_index=?",
+                    (str(staged), job_id, title.index),
+                )
             finally:
                 if not rip_task.done():
                     rip_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await rip_task
+                with suppress(OSError):
+                    attempt.rmdir()
+                    attempts.rmdir()
+                if attempt.exists():
+                    self.database.add_event(
+                        "Kept unverified rip files and diagnostics",
+                        job_id=job_id,
+                        level="warning",
+                        details={"path": str(attempt)},
+                    )
             await report(1.0, "Finished title")
-            self.database.execute(
-                "UPDATE titles SET ripped_path=? WHERE job_id=? AND title_index=?",
-                (str(output), job_id, title.index),
-            )
             self.database.add_event(
                 f"Finished title {title.index}",
                 job_id=job_id,
-                details={"file": output.name},
+                details={"file": staged.name},
             )
         self.database.update_job(job_id, progress=1)
         if self.settings.handbrake_enabled:
@@ -600,13 +686,28 @@ class RipperService:
         can_publish = (
             bool(job["title"])
             and job["metadata_confidence"] >= self.settings.auto_publish_confidence
-            and (
-                job["media_type"] != "tv"
-                or (job["season"] is not None and job["episode_start"] is not None)
-            )
         )
         if job["media_type"] == "tv":
-            await self.hold_tv_job(job_id)
+            assignments = (
+                automatic_episode_assignments(
+                    job["titles"], season=job["season"], disc_name=job["disc_name"]
+                )
+                if can_publish
+                else []
+            )
+            if assignments:
+                first = assignments[0]
+                self.database.update_job(
+                    job_id, season=first["season"], episode_start=first["episode"]
+                )
+                self.database.add_event(
+                    "Episode assignments confirmed",
+                    job_id=job_id,
+                    details={"assignments": assignments, "source": "disc titles"},
+                )
+                await self._publish_automatically(job_id)
+            else:
+                await self.hold_tv_job(job_id)
         elif self.settings.output_mode == "disc":
             await self.complete_disc(job_id)
         elif reason := movie_selection_error(job["titles"]):
@@ -614,7 +715,7 @@ class RipperService:
             self.database.add_event(reason, job_id=job_id, level="warning")
             await self.broadcast()
         elif can_publish:
-            await self.publish_job(job_id)
+            await self._publish_automatically(job_id)
         else:
             self.database.update_job(job_id, status="needs_review")
             self.database.add_event(
@@ -645,6 +746,20 @@ class RipperService:
         )
         await self.broadcast()
 
+    async def _hold_publication(self, job_id: str, error: OSError | ValueError) -> None:
+        self.database.update_job(job_id, status="needs_review", error=str(error))
+        self.database.add_event(str(error), job_id=job_id, level="warning")
+        await self.broadcast()
+
+    async def _publish_automatically(self, job_id: str) -> None:
+        try:
+            await self.publish_job(job_id)
+        except (OSError, ValueError) as exc:
+            job = self.database.job_detail(job_id)
+            if job and job["status"] == "complete":
+                raise
+            await self._hold_publication(job_id, exc)
+
     async def complete_disc(self, job_id: str) -> None:
         """Finish all titles together without replacing an existing disc folder."""
         job = self.database.job_detail(job_id)
@@ -654,6 +769,11 @@ class RipperService:
             return
         stage = Path(job["stage_path"])
         destination = self.destination_folder(job)
+        for title in job["titles"]:
+            if title["selected"]:
+                source = Path(title["ripped_path"])
+                if source.parent != stage or not source.is_file() or not source.stat().st_size:
+                    raise ValueError("All selected titles must have a non-empty file in staging")
         if destination.exists():
             raise FileExistsError(f"Refusing to overwrite {destination}")
         self.database.update_job(job_id, status="publishing")
@@ -663,8 +783,28 @@ class RipperService:
         # Recheck after broadcasting: another drive may have published this name.
         if destination.exists():
             raise FileExistsError(f"Refusing to overwrite {destination}")
+        # Older versions could leave partial files directly in the staging folder.
+        saved = {Path(t["ripped_path"]) for t in job["titles"] if t["ripped_path"]}
+        if self.settings.handbrake_keep_original:
+            saved.update(
+                path.with_name(path.name.removesuffix(".encoded.mkv") + ".mkv")
+                for path in tuple(saved)
+                if path.name.endswith(".encoded.mkv")
+            )
+        unverified = {path for path in stage.iterdir() if path.suffix.lower() == ".mkv"} - saved
+        if unverified:
+            attempts = stage.with_name(f"{stage.name}.attempts")
+            attempts.mkdir(exist_ok=True)
+            retained = Path(tempfile.mkdtemp(prefix="previous-", dir=attempts))
+            for path in unverified:
+                path.rename(retained / path.name)
+            self.database.add_event(
+                "Kept unverified files from earlier rip attempts",
+                job_id=job_id,
+                level="warning",
+                details={"path": str(retained)},
+            )
         stage.rename(destination)
-        await self._save_artwork(job, destination)
         for title in job["titles"]:
             if title["ripped_path"]:
                 self.database.execute(
@@ -682,6 +822,7 @@ class RipperService:
         self.database.add_event(
             "Rip saved to destination", job_id=job_id, details={"path": str(destination)}
         )
+        await self._save_artwork(job_id)
         await self.handoffs.auto(job_id)
         await self.broadcast()
 
@@ -743,10 +884,17 @@ class RipperService:
         override = self.settings.drive_paths.get(job["drive_id"])
         movie_root = Path(override) / "Movies" if override else self.settings.movie_root
         tv_root = Path(override) / "TV" if override else self.settings.tv_root
+        extras = {
+            item["id"]: clean_component(item["name"] or f"Title {item['title_index']:02d}", "Extra")
+            for item in ripped[1:]
+        } if job["media_type"] == "movie" else {}
+        extra_counts = Counter(name.casefold() for name in extras.values())
         for index, title in enumerate(ripped):
             source = Path(title["ripped_path"])
-            if not source.exists():
+            if not source.is_file():
                 raise FileNotFoundError(f"Staged file is missing: {source.name}")
+            if not source.stat().st_size:
+                raise ValueError(f"Staged file is empty: {source.name}")
             episode_name = title["name"]
             if job["media_type"] == "tv":
                 assignment = assignments[title["id"]]
@@ -772,7 +920,9 @@ class RipperService:
                     edition=job["edition"],
                 )
             else:
-                extra_name = title["name"] or f"Title {title['title_index']:02d}"
+                extra_name = extras[title["id"]]
+                if extra_counts[extra_name.casefold()] > 1:
+                    extra_name = f"{extra_name[:160]} - t{title['title_index']:02d}"
                 destination = movie_destination(
                     movie_root,
                     title=job["title"],
@@ -814,7 +964,7 @@ class RipperService:
                 check_existing_episodes(destination.parent, assignment, source)
             if destination.exists() and source != destination:
                 raise FileExistsError(f"Refusing to overwrite {destination}")
-            if any(target == destination for _, _, target in plan):
+            if any(str(target).casefold() == str(destination).casefold() for _, _, target in plan):
                 raise ValueError("The naming template produces duplicate filenames")
             plan.append((title, source, destination))
         # Validate the entire batch before exposing even one file to a library scanner.
@@ -827,49 +977,56 @@ class RipperService:
             if source != destination:
                 if destination.exists():
                     raise FileExistsError(f"Refusing to overwrite {destination}")
-                # Cross-filesystem copies stay invisible as videos until fully copied.
-                temporary = destination.with_name(destination.name + f".{job_id}.pending")
-                if temporary.exists() and temporary != source:
-                    raise FileExistsError(f"An unfinished publish needs inspection: {temporary}")
+                # A fresh name keeps incomplete copies from blocking later attempts.
+                temporary = destination.with_name(f".{uuid.uuid4().hex}.pending")
                 size = source.stat().st_size
                 copied = False
-                if source != temporary:
-                    try:
-                        source.rename(temporary)
-                    except OSError as exc:
-                        if exc.errno != errno.EXDEV:
-                            raise
-                        # Keep the original until the copy is verified and promoted.
-                        await asyncio.to_thread(shutil.copyfile, source, temporary)
-                        copied = True
+                try:
+                    source.rename(temporary)
+                except OSError as exc:
+                    if exc.errno != errno.EXDEV:
+                        raise
+                    # Keep the original until the copy is verified and promoted.
+                    _check_space(destination.parent, size)
+                    await asyncio.to_thread(_copy_for_publication, source, temporary)
+                    copied = True
                 if not copied:
                     self.database.execute(
                         "UPDATE titles SET ripped_path=? WHERE id=?", (str(temporary), title["id"])
                     )
-                if temporary.stat().st_size != size:
-                    raise OSError("Published copy size differs from the staged video")
-                if destination.exists():
-                    raise FileExistsError(f"Refusing to overwrite {destination}")
-                if assignments:
-                    check_existing_episodes(
-                        destination.parent, assignments[title["id"]], temporary
+                try:
+                    if temporary.stat().st_size != size:
+                        raise OSError("Published copy size differs from the staged video")
+                    if destination.exists():
+                        raise FileExistsError(f"Refusing to overwrite {destination}")
+                    if assignments:
+                        check_existing_episodes(
+                            destination.parent, assignments[title["id"]], temporary
+                        )
+                    temporary.rename(destination)
+                    self.database.execute(
+                        "UPDATE titles SET ripped_path=? WHERE id=?",
+                        (str(destination), title["id"]),
                     )
-                temporary.rename(destination)
-                self.database.execute(
-                    "UPDATE titles SET ripped_path=? WHERE id=?", (str(destination), title["id"])
-                )
+                finally:
+                    if copied:
+                        with suppress(OSError):
+                            temporary.unlink(missing_ok=True)
                 if copied:
-                    source.unlink()
+                    try:
+                        source.unlink()
+                    except OSError as exc:
+                        self.database.add_event(
+                            f"Published video; staged copy could not be removed: {exc}",
+                            job_id=job_id,
+                            level="warning",
+                        )
 
             published.append(destination)
-            self.database.execute(
-                "UPDATE titles SET ripped_path=? WHERE id=?", (str(destination), title["id"])
-            )
         stage = Path(job["stage_path"])
         if stage.exists() and not any(stage.iterdir()):
             stage.rmdir()
         common = Path(os.path.commonpath([path.parent for path in published]))
-        await self._save_artwork(job, common)
         self.database.update_job(
             job_id,
             status="complete",
@@ -883,6 +1040,7 @@ class RipperService:
             job_id=job_id,
             details={"paths": [str(path) for path in published]},
         )
+        await self._save_artwork(job_id)
         await self.handoffs.auto(job_id)
         await self.broadcast()
         return self.database.job_detail(job_id) or {}
@@ -912,31 +1070,56 @@ class RipperService:
                 raise MakeMKVError(
                     "HandBrake needs a real video; simulation files cannot be encoded"
                 )
-            output = await encode(Path(title["ripped_path"]), self.settings, report)
+            output = await encode(
+                Path(title["ripped_path"]), self.settings, report, verify=self._verify_video
+            )
             self.database.execute(
                 "UPDATE titles SET ripped_path=? WHERE id=?", (str(output), title["id"])
             )
             self.database.add_event("HandBrake encode completed", job_id=job_id)
         self._telemetry.pop(job_id, None)
 
-    async def _save_artwork(self, job: dict, folder: Path) -> None:
+    async def _verify_video(self, video: Path) -> None:
+        if self.settings.simulate or not self.settings.verify_video:
+            return
+        if ffmpeg := shutil.which(self.settings.ffmpeg_bin):
+            await verify_video(ffmpeg, video)
+
+    async def _save_artwork(self, job_id: str) -> None:
         if not self.settings.artwork_enabled:
             return
-        try:
-            saved = await self.metadata.save_poster(
-                folder, job["title"], job["year"], job["media_type"]
-            )
-            self.database.add_event(
-                "Poster artwork saved"
-                if saved
-                else "No confident artwork match; video saved without a poster",
-                job_id=job["id"],
-                level="info" if saved else "warning",
-            )
-        except Exception as exc:
-            self.database.add_event(
-                f"Video saved; artwork unavailable: {exc}", job_id=job["id"], level="warning"
-            )
+        job = self.database.job_detail(job_id)
+        assert job
+        kind = job["media_type"]
+        poster = poster_path(job)
+        if self.settings.tmdb_token and not poster.is_file():
+            try:
+                if await self.metadata.save_poster(poster.parent, job["title"], job["year"], kind):
+                    self.database.add_event("Poster artwork saved", job_id=job_id)
+                elif not poster.is_file():
+                    self.database.add_event("No confident poster match", job_id=job_id)
+            except Exception as exc:
+                self.database.add_event(
+                    f"Video saved; poster unavailable: {exc}", job_id=job_id, level="warning"
+                )
+        ffmpeg = shutil.which(self.settings.ffmpeg_bin)
+        if self.settings.simulate or not ffmpeg or (kind == "movie" and poster.is_file()):
+            return
+        for title in published_videos(job):
+            video = Path(title["ripped_path"])
+            try:
+                if await save_thumbnail(
+                    ffmpeg, video, thumbnail_path(video, kind), title["duration_seconds"]
+                ):
+                    self.database.add_event(
+                        "Video thumbnail saved", job_id=job_id, details={"video": video.name}
+                    )
+            except (OSError, ValueError, TimeoutError) as exc:
+                self.database.add_event(
+                    f"Video saved; thumbnail unavailable: {exc}",
+                    job_id=job_id,
+                    level="warning",
+                )
 
     async def update_metadata(
         self,
@@ -1008,8 +1191,9 @@ class RipperService:
             try:
                 return await self.publish_job(job_id)
             except (OSError, ValueError) as exc:
-                self.database.update_job(job_id, status="needs_review", error=str(exc))
-                await self.broadcast()
+                after = self.database.job_detail(job_id)
+                if after and after["status"] != "complete":
+                    await self._hold_publication(job_id, exc)
                 raise
         if job and job["status"] == "needs_review":
             await self.retry_job(job_id, approved=True)
@@ -1040,6 +1224,7 @@ class RipperService:
         drive_row = self.database.fetchone("SELECT * FROM drives WHERE id=?", (job["drive_id"],))
         if (
             not drive_row
+            or not drive_row["online"]
             or not drive_row["disc_name"]
             or (drive_row["disc_name"] != job["disc_name"])
         ):
@@ -1089,26 +1274,22 @@ class RipperService:
     ) -> None:
         try:
             async with self._drive_lock(drive.id), self._semaphore.slot(job_id):
+                job = self.database.job_detail(job_id)
+                assert job
+                self.database.update_job(job_id, status="scanning")
+                await self.broadcast()
+                titles = await self.backend.scan_disc(drive.device)
+                if not titles or fingerprint_disc(drive.disc_name, titles) != job["fingerprint"]:
+                    raise ValueError(
+                        "Insert the original disc before retrying. The scanned titles differ "
+                        "from this job, even though the disc label matches."
+                    )
                 await self._rip(job_id, drive, selected)
         except asyncio.CancelledError:
-            self.database.update_job(
-                job_id,
-                status="cancelled",
-                error="Cancelled",
-                completed_at=now_iso(),
-            )
-            self.database.add_event("Job cancelled", job_id=job_id, level="warning")
-            await self.broadcast()
+            await self._record_ingest_end(job_id, "cancelled", "Cancelled")
             raise
         except Exception as exc:
-            self.database.update_job(
-                job_id,
-                status="failed",
-                error=str(exc),
-                completed_at=now_iso(),
-            )
-            self.database.add_event(str(exc), job_id=job_id, level="error")
-            await self.broadcast()
+            await self._record_ingest_end(job_id, "failed", str(exc))
 
     async def start_queued_now(self, job_id: str) -> None:
         job = self.database.job_detail(job_id)
@@ -1128,6 +1309,9 @@ class RipperService:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            job = self.database.fetchone("SELECT status FROM jobs WHERE id=?", (job_id,))
+            if job and job["status"] == "queued":
+                await self._record_ingest_end(job_id, "cancelled", "Cancelled")
             return
         job = self.database.job_detail(job_id)
         if not job:

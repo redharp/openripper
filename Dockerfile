@@ -10,6 +10,7 @@ COPY --from=makemkv /opt/makemkv /opt/makemkv
 
 RUN apk add --no-cache \
       eudev-libs \
+      ffmpeg \
       openjdk21-jre-headless \
       util-linux-misc \
     && ln -s /usr/lib/libudev.so.1 /usr/lib/libudev.so \

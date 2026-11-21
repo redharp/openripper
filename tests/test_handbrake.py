@@ -40,15 +40,15 @@ async def test_missing_cli_returns_help_without_running_anything(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("succeed", [True, False])
-async def test_encode_only_publishes_successful_output(tmp_path, monkeypatch, succeed):
+@pytest.mark.parametrize("result", ["success", "encode failure", "verification failure"])
+async def test_encode_only_publishes_successful_output(tmp_path, monkeypatch, result):
     source = tmp_path / "feature.mkv"
     source.write_bytes(b"original video")
-    settings = Settings(handbrake_keep_original=True)
+    settings = Settings(handbrake_keep_original=result != "verification failure")
     calls = []
 
     class Process:
-        returncode = 0 if succeed else 1
+        returncode = 1 if result == "encode failure" else 0
         stdout = asyncio.StreamReader()
 
         async def wait(self):
@@ -65,10 +65,19 @@ async def test_encode_only_publishes_successful_output(tmp_path, monkeypatch, su
         assert value == 0.5
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    if succeed:
-        result = await encode(source, settings, progress)
-        assert result.name == "feature.encoded.mkv"
-        assert result.read_bytes() == b"encoded video"
+    async def verify(video):
+        assert video.read_bytes() == b"encoded video"
+        assert source.is_file()
+        raise ValueError("Output verification failed")
+
+    if result == "success":
+        output = await encode(source, settings, progress)
+        assert output.name == "feature.encoded.mkv"
+        assert output.read_bytes() == b"encoded video"
+    elif result == "verification failure":
+        with pytest.raises(ValueError, match="Output verification failed"):
+            await encode(source, settings, progress, verify=verify)
+        assert not (tmp_path / "feature.encoded.mkv").exists()
     else:
         with pytest.raises(MakeMKVError, match="Original retained"):
             await encode(source, settings, progress)

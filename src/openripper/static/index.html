@@ -243,7 +243,7 @@
               >
               <p class="field-help">
                 Turning this off stops new automatic jobs. Jobs already in the
-                queue continue.
+                queue continue. Turning it on starts discs waiting in the drives.
               </p>
             </div>
           </section>
@@ -273,12 +273,12 @@
                   <option value="disc">
                     Movies · one folder per disc
                   </option>
-                  <option value="library">
+                  <option value="library" selected>
                     Movies · library naming
                   </option>
                 </select></label
               >
-              <p class="field-help">TV files always need episode matching before entering the TV folder.</p>
+              <p class="field-help">TV enters the library automatically when the show and every episode can be identified. Other discs wait for episode matching.</p>
               <label class="field"
                 ><span>Titles to rip</span
                 ><select id="settings-selection">
@@ -456,27 +456,27 @@
             <div>
               <h2>Artwork</h2>
               <p>
-                Save a poster beside completed video and show it in the
-                dashboard. No image is guessed when the match is uncertain.
+                Show posters in the dashboard and save episode thumbnails
+                alongside the published videos.
               </p>
             </div>
             <fieldset class="settings-fields advanced-protected">
-              <legend class="sr-only">Poster artwork</legend>
+              <legend class="sr-only">Posters and thumbnails</legend>
               <label class="check-field"
                 ><input
                   id="cfg-artwork_enabled"
                   data-setting="artwork_enabled"
                   type="checkbox"
                 />
-                Download poster artwork for confident matches</label
+                Save posters and video thumbnails</label
               >
               <p id="artwork-status" class="field-help">
-                Requires a TMDB API read token on the server.
+                Posters use TMDB. Video thumbnails use FFmpeg.
               </p>
               <p class="field-help">
-                Set OPENRIPPER_TMDB_TOKEN on the server. Disc titles are sent to
-                TMDB only when matching or artwork is enabled. This product uses
-                the TMDB API but is not endorsed or certified by TMDB.
+                Set OPENRIPPER_TMDB_TOKEN for metadata lookup and posters.
+                FFmpeg extracts thumbnails locally. This product uses the TMDB
+                API but is not endorsed or certified by TMDB.
               </p>
             </fieldset>
           </section>

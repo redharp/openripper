@@ -61,7 +61,6 @@ def desktop_settings(data_dir: Path, *, simulate: bool = False) -> Settings:
         "OPENRIPPER_DATABASE_URL": f"sqlite:///{(data_dir / 'openripper.db').as_posix()}",
         "OPENRIPPER_PREFERENCES_PATH": str(data_dir / "preferences.json"),
         "OPENRIPPER_LIBRARY_ROOT": str(data_dir / "Library"),
-        "OPENRIPPER_AUTO_RIP": "false",
         "OPENRIPPER_UDEV_DISCOVERY": "false",
     }
     mkv = shutil.which("makemkvcon64") or shutil.which("makemkvcon")
