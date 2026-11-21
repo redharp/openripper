@@ -155,8 +155,10 @@ function finalFolder(job) {
 }
 function ripLocation(job) {
   const title = job.telemetry?.title_name;
+  const phase = job.telemetry?.phase;
+  const label = phase === "encoding" ? "Encoding" : transferPhase(phase) ? "Title" : "Copying";
   const copying = title
-    ? `<div><dt>${job.telemetry?.phase === "encoding" ? "Encoding" : "Copying"}</dt><dd>${escapeHtml(title)}</dd></div>`
+    ? `<div><dt>${label}</dt><dd>${escapeHtml(title)}</dd></div>`
     : "";
   const folder = finalFolder(job);
   const destination = folder
@@ -218,13 +220,24 @@ function conciseEvent(event) {
     ? problemCopy(event.message)[0]
     : event.message.split("\n")[0];
 }
+function transferPhase(phase) {
+  if (phase === "opening_title")
+    return { label: "Preparing title", detail: "MakeMKV is opening the disc" };
+  if (phase === "verifying_video")
+    return { label: "Verifying video", detail: "Checking the saved video" };
+  return null;
+}
+
 function jobFeedback(job) {
   const t = job.telemetry || {};
+  const phase = job.status === "ripping" ? transferPhase(t.phase) : null;
+  const slow = !phase && t.seconds_since_write >= 60;
   let eta = t.eta_seconds;
   if (
+    !phase &&
     eta == null &&
     t.bytes_per_second == null &&
-    !(t.seconds_since_write >= 60) &&
+    !slow &&
     job.status === "ripping" &&
     job.progress > 0.01 &&
     job.started_at
@@ -235,20 +248,29 @@ function jobFeedback(job) {
       job.progress;
   }
   return {
+    phase,
     speed:
-      t.bytes_per_second == null
+      phase ? null : t.bytes_per_second == null
         ? "Not available yet"
         : t.bytes_per_second === 0 ? "0 B/s" : `${formatBytes(t.bytes_per_second)}/s`,
     eta:
-      t.seconds_since_write >= 60 ? "Waiting for data" : eta != null && job.status === "ripping"
+      phase ? null : slow ? "Waiting for data" : eta != null && job.status === "ripping"
         ? `~${formatDuration(Math.max(60, eta))}`
         : "Calculating…",
     bytes:
       t.bytes_written != null
         ? `${formatWritten(t.bytes_written)} / ${formatBytes(t.bytes_expected)}`
         : elapsedTime(job.started_at || job.created_at),
-    slow: t.seconds_since_write >= 60,
+    warning: t.read_warning || (slow
+      ? "No new data written for over a minute. The drive may be retrying a read."
+      : ""),
   };
+}
+
+function readWarningMarkup(feedback) {
+  return feedback.warning
+    ? `<p class="job-note warning">${escapeHtml(feedback.warning)}</p>`
+    : "";
 }
 
 function formatWritten(bytes) {
@@ -313,6 +335,14 @@ function transferActivity(job, snapshotAge) {
       label: "Finishing files",
 
       detail: `Server updated ${age}s ago`,
+    };
+
+  const phase = transferPhase(t.phase);
+  if (phase)
+    return {
+      kind: "working",
+      label: phase.label,
+      detail: `Server updated ${age}s ago · ${phase.detail}`,
     };
 
   if (t.seconds_since_write == null || !t.bytes_written)
@@ -536,8 +566,9 @@ function renderQueue(data) {
                 const f = jobFeedback(job);
                 const isRip = job.status === "ripping";
                 const encoding = job.telemetry?.phase === "encoding";
+                const estimates = f.phase ? "" : `<div><strong data-live-estimate>${escapeHtml(f.speed)}</strong>Write speed</div><div><strong data-live-estimate>${escapeHtml(f.eta)}</strong>Estimated remaining</div>`;
 
-                return `<article class="job-row" data-job="${escapeHtml(job.id)}"><div class="job-top"><div class="job-title">${badge(encoding ? "encoding" : job.status)}<h3>${escapeHtml(titleFor(job))}</h3><p>Drive ${escapeHtml(driveLabel(job))}${job.telemetry?.title_count ? ` · Title ${job.telemetry.title_number} of ${job.telemetry.title_count}` : ""}</p></div>${isRip ? `<div class="job-percent">${progress.toFixed(1)}<small>%</small></div>` : ""}</div>${isRip || job.status === "scanning" ? `<div class="progress-track ${job.status === "scanning" ? "indeterminate" : ""}" role="progressbar" aria-label="${escapeHtml(titleFor(job))}" ${isRip ? `aria-valuenow="${progress.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"` : 'aria-valuetext="Reading disc"'} style="--progress:${progress / 100}"><span></span></div>` : ""}${transferMarkup(job)}${ripLocation(job)}<div class="job-bottom">${isRip ? `<div class="job-measures"><div><strong>${escapeHtml(f.bytes)}</strong>${job.telemetry?.bytes_written != null ? "Copied" : "Time ripping"}</div><div><strong data-live-estimate>${escapeHtml(f.speed)}</strong>Write speed</div><div><strong data-live-estimate>${escapeHtml(f.eta)}</strong>Estimated remaining</div></div>` : `<p class="job-note">${escapeHtml(!data.runtime && job.status === "scanning" ? "Waiting for capacity or reading the disc. This service version cannot distinguish the two." : encoding ? `Encoding title ${job.telemetry.title_number} of ${job.telemetry.title_count} · ${Math.round((job.telemetry.encode_progress || 0) * 100)}%` : statusCopy(job, progress))}</p>`}<div class="job-actions">${detail(job)}${job.status === "needs_review" ? `<button class="mini-button" data-action="review" data-job="${escapeHtml(job.id)}">${reviewAction(job)}</button>` : `<button class="text-button" data-action="cancel" data-job="${escapeHtml(job.id)}">Cancel</button>`}</div></div>${f.slow ? '<p class="job-note warning">No new data written for over a minute. The drive may be retrying a read; check details.</p>' : ""}</article>`;
+                return `<article class="job-row" data-job="${escapeHtml(job.id)}"><div class="job-top"><div class="job-title">${badge(encoding ? "encoding" : job.status)}<h3>${escapeHtml(titleFor(job))}</h3><p>Drive ${escapeHtml(driveLabel(job))}${job.telemetry?.title_count ? ` · Title ${job.telemetry.title_number} of ${job.telemetry.title_count}` : ""}</p></div>${isRip && !f.phase ? `<div class="job-percent">${progress.toFixed(1)}<small>%</small></div>` : ""}</div>${isRip || job.status === "scanning" ? `<div class="progress-track ${job.status === "scanning" || f.phase ? "indeterminate" : ""}" role="progressbar" aria-label="${escapeHtml(titleFor(job))}" ${isRip && !f.phase ? `aria-valuenow="${progress.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"` : `aria-valuetext="${f.phase?.label || "Reading disc"}"`} style="--progress:${progress / 100}"><span></span></div>` : ""}${transferMarkup(job)}${ripLocation(job)}<div class="job-bottom">${isRip ? `<div class="job-measures"><div><strong>${escapeHtml(f.bytes)}</strong>${job.telemetry?.bytes_written != null ? "Copied" : "Time ripping"}</div>${estimates}</div>` : `<p class="job-note">${escapeHtml(!data.runtime && job.status === "scanning" ? "Waiting for capacity or reading the disc. This service version cannot distinguish the two." : encoding ? `Encoding title ${job.telemetry.title_number} of ${job.telemetry.title_count} · ${Math.round((job.telemetry.encode_progress || 0) * 100)}%` : statusCopy(job, progress))}</p>`}<div class="job-actions">${detail(job)}${job.status === "needs_review" ? `<button class="mini-button" data-action="review" data-job="${escapeHtml(job.id)}">${reviewAction(job)}</button>` : `<button class="text-button" data-action="cancel" data-job="${escapeHtml(job.id)}">Cancel</button>`}</div></div>${readWarningMarkup(f)}</article>`;
               })
               .join("")}</div>`
           : ""
@@ -853,9 +884,10 @@ function renderJobDetail(job) {
   const selected = (job.titles || []).filter((t) => t.selected);
   const liveJob = appState.overview.active_jobs.find(j => j.id === job.id);
   const destination = job.final_path || finalFolder({...liveJob, ...job, destination_folder: job.destination_folder || liveJob?.destination_folder});
+  const estimates = f.phase ? "" : `<div><span>Write speed</span><strong>${escapeHtml(f.speed)}</strong></div><div><span>Estimated remaining</span><strong>${escapeHtml(f.eta)}</strong></div>`;
   $("#job-dialog-title").textContent = titleFor(job);
   $("#job-dialog-body").innerHTML =
-    `${needsEpisodeMatching(job) ? '<span class="state-pill needs_review">Needs episode matching</span>' : badge(job.status)}<div class="detail-stats"><div><span>Drive</span><strong>${escapeHtml(driveLabel(job))}</strong></div><div><span>Progress</span><strong>${job.status === "queued" ? "Waiting for a slot" : job.status === "scanning" ? "Reading disc" : `${((job.progress || 0) * 100).toFixed(1)}%`}</strong></div><div><span>${needsEpisodeMatching(job) ? "Library status" : job.completed_at ? "Finished" : "Time ripping"}</span><strong>${escapeHtml(needsEpisodeMatching(job) ? "Not published" : job.completed_at ? relativeTime(job.completed_at) : elapsedTime(job.started_at))}</strong></div></div>${job.error ? `<div class="error-summary"><strong>${escapeHtml(problem[0])}</strong><p>${escapeHtml(problem[1])}</p></div>` : ""}${job.status === "ripping" ? `<div class="detail-stats"><div><span>Write speed</span><strong>${escapeHtml(f.speed)}</strong></div><div><span>Estimated remaining</span><strong>${escapeHtml(f.eta)}</strong></div><div><span>Written</span><strong>${escapeHtml(f.bytes)}</strong></div></div>` : ""}<section class="detail-block"><h3>${job.final_path ? "Saved location" : "Final destination"}</h3><p class="path">${escapeHtml(destination || "Determined after the disc scan")}</p>${job.stage_path && !job.final_path ? `<details><summary>Temporary staging location</summary><p class="path">${escapeHtml(job.stage_path)}</p></details>` : ""}</section>${f.slow ? `<p class="job-note warning">${escapeHtml(job.telemetry?.read_warning || "No new data written for over a minute. The drive may be retrying a read.")}</p>` : ""}<section class="detail-block"><h3>Selected titles · ${selected.length}</h3><div class="detail-list">${selected.length ? selected.map((t) => `<div><strong>${escapeHtml(t.name || `Title ${t.title_index}`)}</strong><small>Title ${t.title_index} · ${escapeHtml(t.playlist || "Source unavailable")} · ${escapeHtml(formatDuration(t.duration_seconds))} · ${escapeHtml(formatBytes(t.size_bytes))}${t.ripped_path ? " · saved" : ""}</small></div>`).join("") : `<p class="detail-empty">${job.status === "queued" ? "Title selection begins when a slot opens." : job.status === "failed" ? "The disc scan did not return usable titles." : "Titles appear after the disc scan finishes."}</p>`}</div></section>${typeof integrationSummary === "function" ? integrationSummary(job) : ""}<section class="detail-block"><h3>Recent events</h3><div class="detail-list">${(
+    `${needsEpisodeMatching(job) ? '<span class="state-pill needs_review">Needs episode matching</span>' : badge(job.status)}<div class="detail-stats"><div><span>Drive</span><strong>${escapeHtml(driveLabel(job))}</strong></div><div><span>Progress</span><strong>${job.status === "queued" ? "Waiting for a slot" : job.status === "scanning" ? "Reading disc" : f.phase?.label || `${((job.progress || 0) * 100).toFixed(1)}%`}</strong></div><div><span>${needsEpisodeMatching(job) ? "Library status" : job.completed_at ? "Finished" : "Time ripping"}</span><strong>${escapeHtml(needsEpisodeMatching(job) ? "Not published" : job.completed_at ? relativeTime(job.completed_at) : elapsedTime(job.started_at))}</strong></div></div>${job.error ? `<div class="error-summary"><strong>${escapeHtml(problem[0])}</strong><p>${escapeHtml(problem[1])}</p></div>` : ""}${f.phase ? `<p class="job-note">${escapeHtml(f.phase.detail)}</p>` : ""}${job.status === "ripping" ? `<div class="detail-stats">${estimates}<div><span>Written</span><strong>${escapeHtml(f.bytes)}</strong></div></div>` : ""}<section class="detail-block"><h3>${job.final_path ? "Saved location" : "Final destination"}</h3><p class="path">${escapeHtml(destination || "Determined after the disc scan")}</p>${job.stage_path && !job.final_path ? `<details><summary>Temporary staging location</summary><p class="path">${escapeHtml(job.stage_path)}</p></details>` : ""}</section>${readWarningMarkup(f)}<section class="detail-block"><h3>Selected titles · ${selected.length}</h3><div class="detail-list">${selected.length ? selected.map((t) => `<div><strong>${escapeHtml(t.name || `Title ${t.title_index}`)}</strong><small>Title ${t.title_index} · ${escapeHtml(t.playlist || "Source unavailable")} · ${escapeHtml(formatDuration(t.duration_seconds))} · ${escapeHtml(formatBytes(t.size_bytes))}${t.ripped_path ? " · saved" : ""}</small></div>`).join("") : `<p class="detail-empty">${job.status === "queued" ? "Title selection begins when a slot opens." : job.status === "failed" ? "The disc scan did not return usable titles." : "Titles appear after the disc scan finishes."}</p>`}</div></section>${typeof integrationSummary === "function" ? integrationSummary(job) : ""}<section class="detail-block"><h3>Recent events</h3><div class="detail-list">${(
       job.events || []
     )
       .slice(0, 8)

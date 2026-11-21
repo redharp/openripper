@@ -197,6 +197,80 @@ async def test_rip_checks_free_space_before_reading_video(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("simulate", "ffmpeg_available"), [(False, True), (False, False), (True, True)]
+)
+async def test_rip_reports_preparation_real_writes_and_verification(
+    tmp_path, monkeypatch, simulate, ffmpeg_available
+):
+    service = make_service(tmp_path, artwork_enabled=False)
+    service.settings.simulate = simulate
+    no_write = asyncio.Event()
+    first_write = asyncio.Event()
+    snapshots = []
+    verified = []
+    warning = "Disc read error; MakeMKV is retrying"
+
+    # Observe both zero-byte and growing-file samples without waiting two seconds each.
+    original_wait = asyncio.wait
+
+    async def sample_soon(tasks, *, timeout):
+        return await original_wait(tasks, timeout=min(timeout, 0.01))
+
+    async def capture():
+        for job in service.overview()["active_jobs"]:
+            if job["status"] != "ripping":
+                continue
+            telemetry = dict(job["telemetry"])
+            snapshots.append(telemetry)
+            if telemetry.get("bytes_written") == 0:
+                no_write.set()
+            if telemetry.get("bytes_written", 0) > 0:
+                first_write.set()
+
+    async def rip(device, title_index, destination, progress):
+        output = destination / "title.mkv"
+        await progress(0.2, "Ripping title")
+        await progress(0, warning)
+        await no_write.wait()
+        output.write_bytes(b"video contents")
+        await first_write.wait()
+        return output
+
+    async def verify(executable, video):
+        verified.append(video.read_bytes())
+
+    monkeypatch.setattr("openripper.service.asyncio.wait", sample_soon)
+    monkeypatch.setattr("openripper.service.optical_media_labels", lambda: {})
+    monkeypatch.setattr(
+        "openripper.service.shutil.which", lambda _: "ffmpeg" if ffmpeg_available else None
+    )
+    monkeypatch.setattr("openripper.service.verify_video", verify)
+    monkeypatch.setattr(service, "broadcast", capture)
+    monkeypatch.setattr(service.backend, "rip_title", rip)
+
+    await service.poll_once()
+    await asyncio.wait_for(finish(service), timeout=5)
+    (job,) = service.overview()["history"]
+    assert job["status"] == "complete"
+    unwritten = [state for state in snapshots if state.get("bytes_written") == 0]
+    assert unwritten
+    assert all(state.get("phase") == (None if simulate else "opening_title") for state in unwritten)
+    assert all(state.get("read_warning") == warning for state in unwritten)
+
+    observed_write = next(state for state in snapshots if state.get("bytes_written", 0) > 0)
+    assert "phase" not in observed_write
+    assert "read_warning" not in observed_write
+    verification = [state for state in snapshots if state.get("phase") == "verifying_video"]
+    if not simulate and ffmpeg_available:
+        assert verification[0]["bytes_written"] == len(b"video contents")
+        assert verified == [b"video contents"]
+    else:
+        assert not verification
+        assert not verified
+
+
+@pytest.mark.asyncio
 async def test_invalid_video_is_retained_without_publication(tmp_path, monkeypatch):
     service = make_service(tmp_path)
     service.settings.simulate = False

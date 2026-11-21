@@ -587,7 +587,6 @@ class RipperService:
             started_at=now_iso(),
             stage_path=str(stage),
         )
-        await self.broadcast()
         attempts = stage.with_name(f"{stage.name}.attempts")
         meter = TransferMeter(time.monotonic(), stage_bytes(stage))
         expected_bytes = sum(title.size_bytes for title in selected_titles)
@@ -616,11 +615,16 @@ class RipperService:
             baseline_bytes = stage_bytes(stage)
             attempts.mkdir(exist_ok=True)
             attempt = Path(tempfile.mkdtemp(prefix=f"title-{title.index}-", dir=attempts))
-            self._telemetry[job_id] = {
+            telemetry = {
                 "title_number": offset + 1,
                 "title_count": len(selected_titles),
                 "title_name": title.name or f"Title {title.index}",
             }
+            if not self.settings.simulate:
+                telemetry["phase"] = "opening_title"
+            self._telemetry[job_id] = telemetry
+            await self.broadcast()
+            previous_attempt_bytes = 0
             rip_task = asyncio.create_task(
                 self.backend.rip_title(drive.device, title.index, attempt, report),
                 name=f"makemkv-{job_id}-{title.index}",
@@ -628,15 +632,18 @@ class RipperService:
             try:
                 while not rip_task.done():
                     await asyncio.wait({rip_task}, timeout=2)
-                    current_bytes = baseline_bytes + stage_bytes(attempt)
-                    self._telemetry[job_id].update(
-                        meter.sample(time.monotonic(), current_bytes, expected_bytes)
+                    attempt_bytes = stage_bytes(attempt)
+                    telemetry.update(
+                        meter.sample(
+                            time.monotonic(), baseline_bytes + attempt_bytes, expected_bytes
+                        )
                     )
-                    if self._telemetry[job_id]["seconds_since_write"] == 0:
-                        self._telemetry[job_id].pop("read_warning", None)
+                    if attempt_bytes > previous_attempt_bytes:
+                        telemetry.pop("phase", None)
+                        telemetry.pop("read_warning", None)
+                    previous_attempt_bytes = attempt_bytes
                     if title.size_bytes > 0:
-                        written = max(0, current_bytes - baseline_bytes)
-                        await report(min(0.995, written / title.size_bytes), "Ripping title")
+                        await report(min(0.995, attempt_bytes / title.size_bytes), "Ripping title")
                     await self.broadcast()
                 output = await rip_task
                 if (
@@ -646,7 +653,7 @@ class RipperService:
                     or not output.stat().st_size
                 ):
                     raise MakeMKVError("Ripping finished without a non-empty MKV")
-                await self._verify_video(output)
+                await self._verify_video(output, job_id=job_id)
                 staged = stage / output.name
                 if staged.exists():
                     staged = stage / f"{output.stem} - t{title.index:02d}{output.suffix}"
@@ -1079,11 +1086,19 @@ class RipperService:
             self.database.add_event("HandBrake encode completed", job_id=job_id)
         self._telemetry.pop(job_id, None)
 
-    async def _verify_video(self, video: Path) -> None:
+    async def _verify_video(self, video: Path, *, job_id: str | None = None) -> None:
         if self.settings.simulate or not self.settings.verify_video:
             return
         if ffmpeg := shutil.which(self.settings.ffmpeg_bin):
-            await verify_video(ffmpeg, video)
+            telemetry = self._telemetry.get(job_id) if job_id is not None else None
+            try:
+                if telemetry is not None:
+                    telemetry["phase"] = "verifying_video"
+                    await self.broadcast()
+                await verify_video(ffmpeg, video)
+            finally:
+                if telemetry is not None:
+                    telemetry.pop("phase", None)
 
     async def _save_artwork(self, job_id: str) -> None:
         if not self.settings.artwork_enabled:
