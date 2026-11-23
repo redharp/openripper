@@ -101,8 +101,12 @@ async def test_tv_artwork_prefers_show_poster_then_episode_frame(tmp_path, monke
     )
     assert result["status"] == "complete"
     season = show / "Season 02"
-    assert (season / "Example Show - S02E01-thumb.jpg").read_bytes() == b"thumbnail"
+    # Local FFmpeg previews must stay in OpenRipper's cache, never poisoning
+    # Jellyfin/Plex media folders with *-thumb.jpg files.
+    assert not list(season.glob("*-thumb.jpg"))
     assert not (season / "poster.jpg").exists()
+    cached_preview = service.settings.artwork_cache_root / f"{job['id']}.jpg"
+    assert cached_preview.read_bytes() == b"thumbnail"
 
     app = create_app(service.settings, service.backend)
     async with httpx.AsyncClient(

@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from .arr import ArrConfig
-from .artwork import poster_path, published_videos, save_thumbnail, thumbnail_path, verify_video
+from .artwork import (
+    dashboard_thumbnail_path,
+    poster_path,
+    published_videos,
+    save_thumbnail,
+    verify_video,
+)
 from .config import Settings
 from .db import Database, now_iso
 from .discovery import optical_hotplug_events, optical_media_labels
@@ -44,6 +50,7 @@ from .metadata import (
     disc_season,
     disc_title,
     resolve_library_movie,
+    resolve_library_series,
 )
 from .naming import clean_component, movie_destination, tv_destination
 from .output import render_name
@@ -456,17 +463,25 @@ class RipperService:
             match = await self.metadata.resolve(drive.disc_name, titles, media_type=media_type)
             kind = media_type or match.media_type
             if (
-                kind == "movie"
-                and self.settings.output_mode == "library"
-                and not self.settings.tmdb_token
+                self.settings.output_mode == "library"
                 and (match.year is None or match.confidence < self.settings.auto_publish_confidence)
-                and (radarr := self.settings.integrations.get("radarr", {})).get("enabled")
             ):
-                catalog_match = await resolve_library_movie(
-                    drive.disc_name, titles, ArrConfig(**radarr)
-                )
-                if catalog_match:
-                    match = catalog_match
+                if kind == "movie" and (
+                    radarr := self.settings.integrations.get("radarr", {})
+                ).get("enabled"):
+                    catalog_match = await resolve_library_movie(
+                        drive.disc_name, titles, ArrConfig(**radarr)
+                    )
+                    if catalog_match:
+                        match = catalog_match
+                elif kind == "tv" and (
+                    sonarr := self.settings.integrations.get("sonarr", {})
+                ).get("enabled"):
+                    catalog_match = await resolve_library_series(
+                        drive.disc_name, titles, ArrConfig(**sonarr)
+                    )
+                    if catalog_match:
+                        match = catalog_match
             season = disc_season(drive.disc_name, titles) if kind == "tv" else None
             selected = choose_titles(
                 titles,
@@ -1166,23 +1181,30 @@ class RipperService:
                     f"Video saved; poster unavailable: {exc}", job_id=job_id, level="warning"
                 )
         ffmpeg = shutil.which(self.settings.ffmpeg_bin)
-        if self.settings.simulate or not ffmpeg or (kind == "movie" and poster.is_file()):
+        videos = published_videos(job)
+        if self.settings.simulate or not ffmpeg or not videos:
             return
-        for title in published_videos(job):
-            video = Path(title["ripped_path"])
-            try:
-                if await save_thumbnail(
-                    ffmpeg, video, thumbnail_path(video, kind), title["duration_seconds"]
-                ):
-                    self.database.add_event(
-                        "Video thumbnail saved", job_id=job_id, details={"video": video.name}
-                    )
-            except (OSError, ValueError, TimeoutError) as exc:
+        if kind == "movie" and poster.is_file():
+            return
+        # Save FFmpeg preview thumbnails in OpenRipper's cache instead of media
+        # library folders so local frame grabs never override Jellyfin/Plex artwork.
+        preview = dashboard_thumbnail_path(self.settings.artwork_cache_root, job_id)
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        first = videos[0]
+        video = Path(first["ripped_path"])
+        try:
+            if await save_thumbnail(ffmpeg, video, preview, first["duration_seconds"]):
                 self.database.add_event(
-                    f"Video saved; thumbnail unavailable: {exc}",
+                    "Dashboard preview thumbnail saved",
                     job_id=job_id,
-                    level="warning",
+                    details={"video": video.name},
                 )
+        except (OSError, ValueError, TimeoutError) as exc:
+            self.database.add_event(
+                f"Video saved; preview thumbnail unavailable: {exc}",
+                job_id=job_id,
+                level="warning",
+            )
 
     async def update_metadata(
         self,

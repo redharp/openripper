@@ -35,6 +35,11 @@ def thumbnail_path(video: Path, media_type: str) -> Path:
     return video.parent / "thumb.jpg"
 
 
+def dashboard_thumbnail_path(cache_root: Path, job_id: str) -> Path:
+    """Keep FFmpeg preview frames in OpenRipper's cache, out of Jellyfin/Plex media folders."""
+    return cache_root / f"{job_id}.jpg"
+
+
 async def save_thumbnail(
     executable: str, video: Path, thumbnail: Path, duration_seconds: int
 ) -> bool:

@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, SecretStr, ValidationError
 
 from . import __version__
 from .arr import PROVIDERS, ArrClient, ArrConfig, ArrError
-from .artwork import poster_path, published_videos, thumbnail_path
+from .artwork import dashboard_thumbnail_path, poster_path, published_videos, thumbnail_path
 from .config import Settings
 from .db import Database
 from .handbrake import list_presets
@@ -427,6 +427,7 @@ def create_app(
         candidates = [
             poster_path(job),
             folder / "poster.jpg",  # Older TV jobs saved the poster beside the episodes.
+            dashboard_thumbnail_path(settings.artwork_cache_root, job_id),
             *(
                 thumbnail_path(Path(title["ripped_path"]), kind)
                 for title in published_videos(job)

@@ -7,9 +7,10 @@ from pathlib import Path
 ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 SPACES = re.compile(r"\s+")
 YEAR = re.compile(r"(?:^|\s)(?:\(((?:19|20)\d{2})\)|((?:19|20)\d{2}))$")
-DISC_SUFFIX = re.compile(r"\s+(?:DISC|DISK|D)\s*\d+$", re.IGNORECASE)
+DISC_SUFFIX = re.compile(r"\s+(?:DISC|DISK|BD|D)\s*\d+$", re.IGNORECASE)
 NOISE = re.compile(
-    r"\b(?:UHD|ULTRA\s*HD|BLU[ -]?RAY|BDMV|RETAIL|REMUX)\b",
+    r"\b(?:4K|2160P|1080P|UHD|ULTRA\s*HD|BLU[ -]?RAY|BDMV|BD[ -]?ROM|"
+    r"DVD[ -]?VIDEO|DVD|NTSC|PAL|WIDESCREEN|FULLSCREEN|RETAIL|REMUX)\b",
     re.IGNORECASE,
 )
 

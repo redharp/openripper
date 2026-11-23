@@ -62,6 +62,8 @@ def test_windows_unsafe_characters_are_removed() -> None:
         ("EXAMPLE_MOVIE_D2", ("Example Movie", None)),
         ("EXAMPLE_MOVIE_DISC_2_2020", ("Example Movie", 2020)),
         ("EXAMPLE_MOVIE_(2020)_UHD", ("Example Movie", 2020)),
+        ("EXAMPLE_MOVIE_2020_4K_2160P_BD1", ("Example Movie", 2020)),
+        ("EXAMPLE_MOVIE_1080P_WIDESCREEN_NTSC", ("Example Movie", None)),
     ],
 )
 def test_disc_labels_preserve_title_numbers_and_remove_disc_suffixes(label, expected):

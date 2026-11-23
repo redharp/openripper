@@ -11,6 +11,9 @@ EPISODE_WORDS = re.compile(
     r"(?<![a-z0-9])season[\s_.-]+(\d{1,3})[\s_.-]+episode[\s_.-]+(\d{1,4})(?![a-z0-9])",
     re.I,
 )
+EPISODE_X_TOKEN = re.compile(r"(?<![a-z0-9])(\d{1,2})x(\d{2,3})(?![a-z0-9])", re.I)
+EPISODE_TITLE_DELIMITER = re.compile(r"^\s*(?:[-–—:]|\|)\s*")
+GENERIC_EPISODE_TAIL = re.compile(r"^(?:main\s*feature|title\s*\d+|disc\s*\d+)$", re.I)
 
 
 def named_episodes(filename: str) -> set[tuple[int, int]]:
@@ -26,17 +29,41 @@ def named_episodes(filename: str) -> set[tuple[int, int]]:
             else:
                 episodes.add((season, number))
             previous = number
+    for match in EPISODE_X_TOKEN.finditer(filename):
+        episodes.add((int(match[1]), int(match[2])))
     return episodes
 
 
-def _title_episode_range(name: str) -> tuple[int, int, int] | None:
+def _extract_episode_title(tail: str) -> str:
+    delimiter = EPISODE_TITLE_DELIMITER.match(tail)
+    if not delimiter:
+        return ""
+    candidate = re.sub(
+        r"\.(?:mkv|mp4|m4v|avi|mov|ts|m2ts|wmv|webm)$",
+        "",
+        tail[delimiter.end():],
+        flags=re.I,
+    )
+    candidate = re.sub(r"\s+", " ", candidate).strip(" -_.")
+    if not candidate or GENERIC_EPISODE_TAIL.match(candidate):
+        return ""
+    return candidate
+
+
+def _title_episode_match(name: str) -> tuple[int, int, int, str] | None:
     codes = list(EPISODE_TOKEN.finditer(name))
     words = list(EPISODE_WORDS.finditer(name))
-    if len(codes) + len(words) != 1:
+    xcodes = list(EPISODE_X_TOKEN.finditer(name))
+    if len(codes) + len(words) + len(xcodes) != 1:
         return None
     if words:
-        season, episode = map(int, words[0].groups())
-        return season, episode, episode
+        match = words[0]
+        season, episode = map(int, match.groups())
+        return season, episode, episode, _extract_episode_title(name[match.end():])
+    if xcodes:
+        match = xcodes[0]
+        season, episode = map(int, match.groups())
+        return season, episode, episode, _extract_episode_title(name[match.end():])
 
     match = codes[0]
     # A complete episode code is required; an alphanumeric suffix could be
@@ -51,7 +78,12 @@ def _title_episode_range(name: str) -> tuple[int, int, int] | None:
         if number <= last or (not part[1] and number != last + 1):
             return None
         last = number
-    return season, first, last
+    return season, first, last, _extract_episode_title(tail)
+
+
+def _title_episode_range(name: str) -> tuple[int, int, int] | None:
+    matched = _title_episode_match(name)
+    return matched[:3] if matched else None
 
 
 def automatic_episode_assignments(
@@ -62,26 +94,28 @@ def automatic_episode_assignments(
     assignments = []
     for title in titles:
         name = title["name"]
-        identity = _title_episode_range(name)
+        matched = _title_episode_match(name)
+        identity = matched[:3] if matched else None
         if not title["selected"]:
             # Do not silently skip an explicitly numbered episode that was
             # filtered out of the rip, unless it is a proven duplicate track.
             if identity and title.get("duplicate_of") is None:
                 return []
             continue
-        if not identity or identity == volume_episode:
+        if not matched or identity == volume_episode:
             return []
-        title_season, first, last = identity
+        title_season, first, last, episode_title = matched
         if season is not None and title_season != season:
             return []
-        assignments.append(
-            {
-                "title_id": title["id"],
-                "season": title_season,
-                "episode": first,
-                "episode_end": last,
-            }
-        )
+        entry: dict = {
+            "title_id": title["id"],
+            "season": title_season,
+            "episode": first,
+            "episode_end": last,
+        }
+        if episode_title:
+            entry["episode_title"] = episode_title
+        assignments.append(entry)
     try:
         return list(validate_assignments(titles, assignments).values())
     except ValueError:
