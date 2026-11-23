@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM jlesage/makemkv:v26.07.2@sha256:0b81851803e805cb1ac1428c790f18813697417d507a93db6945c1ac30378bc3 AS makemkv
+FROM jlesage/makemkv:v26.09.2@sha256:bfdddd29c5a9958da3003df1e673de7ad6915c846723449c76196d4ef6ca1ca2 AS makemkv
 
 FROM python:3.12-alpine3.22
 LABEL org.opencontainers.image.title="OpenRipper"
