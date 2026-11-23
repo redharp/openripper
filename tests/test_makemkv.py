@@ -1,3 +1,6 @@
+import asyncio
+import sys
+
 import pytest
 
 from openripper.makemkv import (
@@ -70,6 +73,15 @@ def test_smart_mode_selects_movie_main_feature() -> None:
     assert titles[1].selected is False
 
 
+def test_smart_movie_does_not_replace_the_feature_with_an_extras_cluster() -> None:
+    titles = [
+        TitleInfo(index=index, duration_seconds=duration)
+        for index, duration in enumerate((5100, 1350, 1400, 1450))
+    ]
+    selected = choose_titles(titles, min_seconds=1200, mode="smart", media_type="movie")
+    assert [title.index for title in selected] == [0]
+
+
 def test_smart_mode_selects_episodic_cluster() -> None:
     titles = parse_titles(ROBOT_OUTPUT)
     for index, seconds in enumerate([2700, 2680, 2750, 2710]):
@@ -121,6 +133,66 @@ async def test_empty_scan_exposes_cause(monkeypatch, output, expected):
     monkeypatch.setattr(backend, "_capture", capture)
     with pytest.raises(MakeMKVError, match=expected):
         await backend.scan_disc("/dev/sr0")
+
+
+@pytest.mark.asyncio
+async def test_capture_preserves_a_successful_robot_scan_with_warning_exit():
+    python = getattr(sys, "_base_executable", sys.executable)
+    backend = MakeMKVBackend(python)
+    output = await backend._capture(
+        "-c",
+        f"print({SUCCESSFUL_SCAN_WITH_WARNINGS!r}); raise SystemExit(1)",
+        operation="disc scan",
+        timeout=10,
+        accept_successful_title_scan=True,
+    )
+    assert parse_titles(output)[0].name == "MainFeature"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["overflow", "timeout", "cancel"])
+async def test_capture_stops_a_real_child_and_keeps_scan_diagnostics(monkeypatch, stop):
+    python = getattr(sys, "_base_executable", sys.executable)
+    backend = MakeMKVBackend(python)
+    native_spawn = asyncio.create_subprocess_exec
+    spawned = asyncio.Event()
+    child = None
+
+    async def spawn(*args, **kwargs):
+        nonlocal child
+        child = await native_spawn(*args, **kwargs)
+        spawned.set()
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr("openripper.makemkv.CAPTURE_LIMIT_BYTES", 256 * 1024)
+    if stop == "overflow":
+        script = (
+            "import sys\nwhile True:\n"
+            "\tsys.stdout.buffer.write(b'MSG:2003,0,0,\"Disc read error\"\\n' * 2000)\n"
+            "\tsys.stdout.buffer.flush()"
+        )
+    else:
+        script = 'import time; print("Drive has not returned", flush=True); time.sleep(20)'
+
+    task = asyncio.create_task(
+        backend._capture(
+            "-c", script, operation="disc scan", timeout=2 if stop == "timeout" else 10
+        )
+    )
+    if stop == "cancel":
+        await asyncio.wait_for(spawned.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+    else:
+        message = "too much output" if stop == "overflow" else "timed out"
+        evidence = "Disc read error" if stop == "overflow" else "Drive has not returned"
+        with pytest.raises(MakeMKVError, match=message) as error:
+            await asyncio.wait_for(task, timeout=12)
+        assert str(error.value).count(evidence) == 1
+        assert len(str(error.value)) < 1000
+    assert child is not None and child.returncode is not None
 
 
 def episodic_alternates():
@@ -183,8 +255,6 @@ def test_all_mode_preserves_alternates_and_tv_can_select_two_episodes():
 
 @pytest.mark.asyncio
 async def test_read_errors_are_reported_while_process_is_still_running(tmp_path, monkeypatch):
-    import asyncio
-
     stream = asyncio.StreamReader()
     stream.feed_data(b'PRGV:100,100,1000\nMSG:2003,0,0,"Read failed"\n')
     stream.feed_eof()

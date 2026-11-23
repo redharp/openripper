@@ -9,8 +9,9 @@
       content="OpenRipper — your DVD and Blu-ray rip queue."
     />
     <title>OpenRipper · Rip queue</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=0.3.0" />
-    <script src="/assets/app.js?v=0.3.0" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=0.4.0" />
+    <script src="/assets/app.js?v=0.4.0" defer></script>
+    <script src="/assets/episodes.js?v=0.1.0" defer></script>
     <script src="/assets/integrations.js?v=0.1.0" defer></script>
   </head>
   <body>
@@ -242,7 +243,7 @@
               >
               <p class="field-help">
                 Turning this off stops new automatic jobs. Jobs already in the
-                queue continue.
+                queue continue. Turning it on starts discs waiting in the drives.
               </p>
             </div>
           </section>
@@ -270,13 +271,14 @@
                 ><span>Folder naming</span
                 ><select id="settings-output">
                   <option value="disc">
-                    One folder per disc · save automatically
+                    Movies · one folder per disc
                   </option>
-                  <option value="library">
-                    Media library · review uncertain names
+                  <option value="library" selected>
+                    Movies · library naming
                   </option>
                 </select></label
               >
+              <p class="field-help">TV enters the library automatically when the show and every episode can be identified. Other discs wait for episode matching.</p>
               <label class="field"
                 ><span>Titles to rip</span
                 ><select id="settings-selection">
@@ -323,8 +325,8 @@
                   required
               /></label>
               <p class="field-help">
-                Use {disc}, {title}, {year}, and {job_id}. Keep {job_id} for
-                collision protection.
+                Default: {disc}, the disc name without a hash. Existing folders
+                are never overwritten. Optional: {title}, {year}, {job_id}.
               </p>
               <label class="field"
                 ><span>Movie filename format</span
@@ -454,27 +456,27 @@
             <div>
               <h2>Artwork</h2>
               <p>
-                Save a poster beside completed video and show it in the
-                dashboard. No image is guessed when the match is uncertain.
+                Show posters in the dashboard and save episode thumbnails
+                alongside the published videos.
               </p>
             </div>
             <fieldset class="settings-fields advanced-protected">
-              <legend class="sr-only">Poster artwork</legend>
+              <legend class="sr-only">Posters and thumbnails</legend>
               <label class="check-field"
                 ><input
                   id="cfg-artwork_enabled"
                   data-setting="artwork_enabled"
                   type="checkbox"
                 />
-                Download poster artwork for confident matches</label
+                Save posters and video thumbnails</label
               >
               <p id="artwork-status" class="field-help">
-                Requires a TMDB API read token on the server.
+                Posters use TMDB. Video thumbnails use FFmpeg.
               </p>
               <p class="field-help">
-                Set OPENRIPPER_TMDB_TOKEN on the server. Disc titles are sent to
-                TMDB only when matching or artwork is enabled. This product uses
-                the TMDB API but is not endorsed or certified by TMDB.
+                Set OPENRIPPER_TMDB_TOKEN for metadata lookup and posters.
+                FFmpeg extracts thumbnails locally. This product uses the TMDB
+                API but is not endorsed or certified by TMDB.
               </p>
             </fieldset>
           </section>
@@ -698,21 +700,23 @@
               value="1"
             />
           </label>
-          <label class="field tv-only">
-            <span>First episode</span>
-            <input
-              id="review-episode"
-              name="episode_start"
-              type="number"
-              min="0"
-              value="1"
-            />
-          </label>
+          <input id="review-episode" type="hidden" />
         </div>
         <fieldset class="title-picker">
           <legend>Titles to publish</legend>
+          <p class="tv-only">Disc title numbers do not identify episodes. Match each copied file below; leave extras unselected.</p>
           <div id="review-titles"></div>
         </fieldset>
+        <section id="episode-matching" hidden aria-label="Episode matching">
+          <div class="episode-lookup">
+            <h3>Match to episodes</h3>
+            <p class="field-help">Use Sonarr’s existing shows, or enter episode details yourself. No files enter the TV folder until you publish.</p>
+            <div class="episode-search"><label class="field"><span>Find show in Sonarr</span><input id="episode-query" type="search" /></label><button id="episode-search-button" class="button" type="button">Find show</button></div>
+            <label class="field" id="episode-show-field" hidden><span>Matching shows</span><select id="episode-show"><option value="">Choose a show</option></select></label>
+            <p id="episode-lookup-status" class="field-help" role="status"></p>
+          </div>
+          <div id="episode-files"></div>
+        </section>
         <div id="review-error" class="form-error" role="alert"></div>
         <div class="dialog-actions">
           <button class="button button-quiet" value="cancel" formnovalidate>

@@ -2,10 +2,11 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from test_autorip import finish, make_service
 
 from openripper.config import Settings
 from openripper.db import Database
-from openripper.makemkv import SimulationBackend
+from openripper.makemkv import SimulationBackend, TitleInfo
 from openripper.service import RipperService, stage_bytes
 
 
@@ -21,6 +22,7 @@ def test_stage_bytes_counts_growing_mkv_files(tmp_path: Path) -> None:
 async def test_simulated_disc_rips_then_waits_for_safe_publish(tmp_path: Path) -> None:
     settings = Settings(
         output_mode="library",
+        auto_publish_confidence=0.99,
         library_root=tmp_path / "library",
         movie_root=tmp_path / "library" / "Movies",
         tv_root=tmp_path / "library" / "TV",
@@ -62,6 +64,66 @@ async def test_simulated_disc_rips_then_waits_for_safe_publish(tmp_path: Path) -
     assert published["status"] == "complete"
     destination = settings.movie_root / "Dune Part Two (2024)" / "Dune Part Two (2024).mkv"
     assert destination.is_file()
+
+
+@pytest.mark.asyncio
+async def test_simulated_movie_publishes_automatically_with_default_library_settings(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        library_root=tmp_path / "library",
+        movie_root=tmp_path / "Movies",
+        tv_root=tmp_path / "TV",
+        database_url=f"sqlite:///{tmp_path / 'service.db'}",
+        eject_on_success=False,
+        udev_discovery=False,
+        compatibility_check=False,
+        simulate=True,
+    )
+    database = Database(settings.database_url)
+    database.initialize()
+    service = RipperService(settings, database, SimulationBackend())
+
+    await service.poll_once()
+    await asyncio.gather(*list(service._tasks.values()))
+
+    (job,) = service.overview()["history"]
+    assert job["status"] == "complete"
+    assert job["media_type"] == "movie"
+    output = settings.movie_root / "Dune Part Two (2024)" / "Dune Part Two (2024).mkv"
+    assert output.read_bytes() == b"OPENRIPPER SIMULATION\n"
+
+
+@pytest.mark.asyncio
+async def test_catalog_publishes_movie_with_mastering_suffix(tmp_path, monkeypatch):
+    service = make_service(
+        tmp_path,
+        output_mode="library",
+        integrations={
+            "radarr": {"enabled": True, "url": "http://arr.test", "api_key": "test-key"}
+        },
+    )
+    service.backend.label = "EXAMPLE_UPK76"
+
+    async def scan(_device):
+        return [TitleInfo(index=0, duration_seconds=5400, name="MainFeature")]
+
+    async def request(client, method, route, **kwargs):
+        assert client.provider == "radarr"
+        assert (method, route, kwargs) == ("GET", "movie", {})
+        return [{"id": 7, "title": "Example", "year": 2001, "runtime": 90}]
+
+    monkeypatch.setattr(service.backend, "scan_disc", scan)
+    monkeypatch.setattr("openripper.arr.ArrClient.request", request)
+    await service.poll_once()
+    await finish(service)
+
+    (job,) = service.overview()["history"]
+    assert job["status"] == "complete", job["error"]
+    assert job["title"] == "Example"
+    assert job["year"] == 2001
+    output = service.settings.movie_root / "Example (2001)" / "Example (2001).mkv"
+    assert output.read_bytes() == b"test video contents"
 
 
 @pytest.mark.asyncio

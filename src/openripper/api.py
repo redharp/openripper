@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, SecretStr, ValidationError
 
 from . import __version__
 from .arr import PROVIDERS, ArrClient, ArrConfig, ArrError
+from .artwork import poster_path, published_videos, thumbnail_path
 from .config import Settings
 from .db import Database
 from .handbrake import list_presets
@@ -59,6 +60,7 @@ def persist_settings(settings: Settings) -> None:
     persisted.update(
         movie_root=str(settings.movie_root),
         tv_root=str(settings.tv_root),
+        ffmpeg_bin=settings.ffmpeg_bin,
         integrations=settings.integrations,
     )
     with tempfile.NamedTemporaryFile(
@@ -72,6 +74,14 @@ def persist_settings(settings: Settings) -> None:
         temporary.unlink(missing_ok=True)
 
 
+class EpisodeAssignment(BaseModel):
+    title_id: int = Field(gt=0)
+    season: int = Field(ge=0, le=999)
+    episode: int = Field(ge=1, le=9999)
+    episode_end: int | None = Field(default=None, ge=1, le=9999)
+    episode_title: str = Field(default="", max_length=180)
+
+
 class MetadataUpdate(BaseModel):
     media_type: str = Field(pattern="^(movie|tv)$")
     title: str = Field(min_length=1, max_length=180)
@@ -80,6 +90,7 @@ class MetadataUpdate(BaseModel):
     episode_start: int | None = Field(default=None, ge=0, le=9999)
     edition: str = Field(default="", max_length=120)
     selected_title_ids: list[int] | None = None
+    episode_assignments: list[EpisodeAssignment] | None = None
 
 
 class StartRequest(BaseModel):
@@ -133,11 +144,14 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        await service.start()
         try:
+            await service.start()
             yield
         finally:
-            await service.stop()
+            try:
+                await service.stop()
+            finally:
+                database.engine.dispose()
 
     app = FastAPI(
         title="OpenRipper",
@@ -271,6 +285,7 @@ def create_app(
     async def capabilities() -> dict[str, Any]:
         return {
             "tmdb_configured": bool(settings.tmdb_token),
+            "ffmpeg_available": bool(shutil.which(settings.ffmpeg_bin)),
             "handbrake_available": bool(shutil.which(settings.handbrake_bin)),
             "live_settings": True,
         }
@@ -344,7 +359,7 @@ def create_app(
             try:
                 for name in ("disc_folder_template", "movie_name_template", "tv_name_template"):
                     if name in values:
-                        validate_template(values[name], unique=name == "disc_folder_template")
+                        validate_template(values[name])
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
             updated = replace(settings, **values)
@@ -358,8 +373,6 @@ def create_app(
                 raise HTTPException(
                     422, "HandBrakeCLI was not found. Install it separately or fix its path"
                 )
-            if updated.artwork_enabled and not settings.tmdb_token:
-                raise HTTPException(422, "Artwork needs OPENRIPPER_TMDB_TOKEN on the server")
             try:
                 if not busy:
                     destinations = {root, *(Path(p) for p in updated.drive_paths.values())}
@@ -401,7 +414,7 @@ def create_app(
             raise HTTPException(404, "Job not found")
         try:
             return await service.update_metadata(job_id, **payload.model_dump())
-        except (ValueError, FileExistsError, FileNotFoundError) as exc:
+        except (ValueError, OSError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/jobs/{job_id}/artwork")
@@ -409,10 +422,20 @@ def create_app(
         job = database.job_detail(job_id)
         if not job or not job["final_path"]:
             raise HTTPException(404, "No saved artwork")
-        path = Path(job["final_path"]) / "poster.jpg"
-        if not path.is_file():
-            raise HTTPException(404, "No saved artwork")
-        return FileResponse(path, media_type="image/jpeg")
+        folder = Path(job["final_path"])
+        kind = job["media_type"]
+        candidates = [
+            poster_path(job),
+            folder / "poster.jpg",  # Older TV jobs saved the poster beside the episodes.
+            *(
+                thumbnail_path(Path(title["ripped_path"]), kind)
+                for title in published_videos(job)
+            ),
+        ]
+        for path in candidates:
+            if path.is_file():
+                return FileResponse(path, media_type="image/jpeg")
+        raise HTTPException(404, "No saved artwork")
 
     @app.post("/api/jobs/{job_id}/retry", status_code=202)
     async def retry(job_id: str) -> dict[str, str]:

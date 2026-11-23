@@ -65,7 +65,7 @@ async def list_presets(executable: str) -> dict:
     }
 
 
-async def encode(source: Path, settings, progress) -> Path:
+async def encode(source: Path, settings, progress, *, verify=None) -> Path:
     destination = source.with_name(f"{source.stem}.encoded.mkv")
     temporary = source.with_name(f"{source.stem}.encoding.mkv")
     if destination.exists() or temporary.exists():
@@ -118,6 +118,8 @@ async def encode(source: Path, settings, progress) -> Path:
             raise MakeMKVError(
                 "HandBrake encoding failed. Original retained in staging.\n" + "\n".join(tail)
             )
+        if verify is not None:
+            await verify(temporary)
         temporary.rename(destination)
         if not settings.handbrake_keep_original:
             source.unlink()

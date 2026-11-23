@@ -21,7 +21,7 @@ FIELDS = {
 }
 
 
-def validate_template(template: str, *, unique: bool = False) -> None:
+def validate_template(template: str) -> None:
     if (
         not template.strip()
         or len(template) > 200
@@ -30,7 +30,6 @@ def validate_template(template: str, *, unique: bool = False) -> None:
         raise ValueError(
             "Naming templates must be a filename, without paths or reserved characters"
         )
-    seen = set()
     try:
         for _, name, spec, conversion in Formatter().parse(template):
             if name is None:
@@ -39,11 +38,8 @@ def validate_template(template: str, *, unique: bool = False) -> None:
                 raise ValueError("Unsupported naming placeholder or format")
             if spec and name not in {"year", "season", "episode", "title_index"}:
                 raise ValueError("Number formatting requires a numeric placeholder")
-            seen.add(name)
     except ValueError as exc:
         raise ValueError(f"Invalid naming template: {exc}") from exc
-    if unique and "job_id" not in seen:
-        raise ValueError("Disc folder template must contain {job_id} to prevent overwrites")
 
 
 def render_name(template: str, **values) -> str:

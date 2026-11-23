@@ -6,7 +6,7 @@ const context = {};
 vm.createContext(context);
 vm.runInContext(
   source.slice(
-    source.indexOf("function observeWrite("),
+    source.indexOf("function transferPhase("),
     source.indexOf("function transferMarkup("),
   ),
   context,
@@ -45,10 +45,6 @@ assert.equal(
 assert.equal(observeWrite(null, { bytes_written: 100 }, 1000).at, null);
 console.log("Live feedback freshness and write detection passed");
 
-vm.runInContext(
-  source.slice(source.indexOf('function jobFeedback('), source.indexOf('function observeWrite(')),
-  context,
-);
 Object.assign(context, {
   formatBytes: n => `${n} B`, formatDuration: n => `${n}s`,
   elapsedTime: () => '30m elapsed', utcDate: value => new Date(value),
@@ -60,3 +56,32 @@ assert.equal(context.jobFeedback(stopped).eta, 'Waiting for data');
 assert.equal(context.jobFeedback({...stopped, telemetry: {bytes_per_second: 0}}).eta, 'Calculating…');
 assert.equal(context.jobFeedback({...stopped, telemetry: {bytes_per_second: 1000, eta_seconds: 120}}).eta, '~120s');
 console.log('Stopped transfers show zero speed and suppress misleading ETAs');
+
+const preparation = {
+  ...stopped,
+  telemetry: { ...stopped.telemetry, phase: "opening_title", bytes_written: 15000 },
+};
+const verification = {
+  ...preparation,
+  telemetry: { ...preparation.telemetry, phase: "verifying_video" },
+};
+assert.equal(transferActivity(preparation, 5).label, "Preparing title");
+assert.match(transferActivity(preparation, 5).detail, /MakeMKV is opening the disc/);
+assert.equal(transferActivity(verification, 5).label, "Verifying video");
+for (const phase of [preparation, verification]) {
+  assert.equal(transferActivity(phase, 5).kind, "working");
+  assert.equal(transferActivity(phase, 16).kind, "stale");
+  const feedback = context.jobFeedback(phase);
+  assert.equal(feedback.speed, null);
+  assert.equal(feedback.eta, null);
+  assert.equal(feedback.warning, "");
+  assert.match(feedback.bytes, /^15000 B/);
+}
+const warning = "Disc read error; MakeMKV is retrying";
+const withWarning = {
+  ...preparation,
+  telemetry: { ...preparation.telemetry, read_warning: warning },
+};
+assert.equal(context.jobFeedback(withWarning).warning, warning);
+assert.equal(context.jobFeedback(stopped).warning.length > 0, true);
+console.log("Opening and verification display their phase and retain real read warnings");

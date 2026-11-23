@@ -1,13 +1,18 @@
 # OpenRipper
 
-Self-hosted DVD and Blu-ray ripping. Insert a disc and save it to your own storage,
-or turn automation off and start each rip from the queue.
+Self-hosted DVD and Blu-ray auto ripper. Insert a disc to rip it, name confidently
+identified movies or episodes, and file them in your movie or TV library.
+Uncertain matches wait for review.
 
 - Multiple drives, live progress and configurable concurrent jobs
 - Separate movie/TV folders, per-drive destinations and title previews
 - Audio, subtitles, extras and optional HandBrake presets
 - Sonarr/Radarr imports and naming for existing library titles
 - Windows desktop companion or Linux Docker deployment
+
+[![OpenRipper demo queue showing active rips, transfer speeds, destinations and waiting discs](docs/screenshots/rip-queue.jpg)](docs/SCREENSHOTS.md)
+
+[More screenshots: settings and integrations](docs/SCREENSHOTS.md) · Demo data shown.
 
 ## Docker
 
@@ -32,6 +37,7 @@ drive mappings and storage setup.
 ## Windows
 
 Install Python 3.12+ and [MakeMKV](https://www.makemkv.com/download/).
+Install [FFmpeg](https://ffmpeg.org/download.html) for automatic thumbnails and video checks.
 Open MakeMKV once to activate your license or evaluation, then run in this folder:
 
 ```powershell

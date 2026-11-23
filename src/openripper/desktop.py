@@ -61,7 +61,6 @@ def desktop_settings(data_dir: Path, *, simulate: bool = False) -> Settings:
         "OPENRIPPER_DATABASE_URL": f"sqlite:///{(data_dir / 'openripper.db').as_posix()}",
         "OPENRIPPER_PREFERENCES_PATH": str(data_dir / "preferences.json"),
         "OPENRIPPER_LIBRARY_ROOT": str(data_dir / "Library"),
-        "OPENRIPPER_AUTO_RIP": "false",
         "OPENRIPPER_UDEV_DISCOVERY": "false",
     }
     mkv = shutil.which("makemkvcon64") or shutil.which("makemkvcon")
@@ -210,7 +209,12 @@ def run() -> None:
             with build_opener(ProxyHandler({})).open(url + "/assets/app.js") as response:
                 assert response.status == 200 and len(response.read()) > 100
             assert health["simulation"] and not health["auto_rip"]
-            assert not read_json(url + "/api/overview")["active_jobs"]
+            # Discovery may already have registered the simulated disc. Paused
+            # jobs are expected; the smoke check must reject actual rip work.
+            assert all(
+                job["status"] == "awaiting_start"
+                for job in read_json(url + "/api/overview")["active_jobs"]
+            )
             if args.smoke_window:
                 check_native_window(url, args.data_dir)
             (args.data_dir / "smoke-result.json").write_text(

@@ -16,8 +16,10 @@ Requirements: Windows 10/11 x64, Microsoft Edge WebView2 Runtime, and a separate
 installed/activated MakeMKV for real discs. Optional encoding also requires
 HandBrakeCLI. These media tools are not included in the Windows package.
 
-On a new installation, automatic ripping is **off**. Set your destination in
-Settings, check the detected drives, then enable automatic ripping when ready.
+On a new installation, OpenRipper starts on disc insertion and publishes
+identified movies and episodes to the local Library folder. Set your destination
+in Settings before inserting the first disc if you want to save elsewhere.
+Install FFmpeg for video checks and local artwork.
 The desktop app detects MakeMKV in its normal installation folder or PATH.
 Use `OPENRIPPER_MAKEMKV_BIN` for a custom installation.
 

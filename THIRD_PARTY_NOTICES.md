@@ -16,6 +16,9 @@ relicense bundled or separately installed dependencies.
   folder for dependency metadata and available license texts.
 - **Container components**, including Python, Alpine packages, Java, and
   PostgreSQL, remain governed by their respective upstream licenses.
+- **FFmpeg** is invoked as a separate executable for output checks and
+  thumbnails. The Docker image installs [Alpine's FFmpeg package](https://pkgs.alpinelinux.org/package/v3.22/community/x86_64/ffmpeg).
+  Windows users can supply their own installation.
 - **Impeccable** is optional developer tooling. Local skill installations and
   binaries are excluded from this repository and release packages.
 

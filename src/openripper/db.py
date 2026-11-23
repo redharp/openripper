@@ -309,9 +309,7 @@ class Database:
             result["titles"] = [
                 _model_dict(row)
                 for row in session.scalars(
-                    select(Title)
-                    .where(Title.job_id == job_id)
-                    .order_by(Title.duration_seconds.desc())
+                    select(Title).where(Title.job_id == job_id).order_by(Title.title_index)
                 ).all()
             ]
             result["events"] = [
@@ -331,6 +329,15 @@ class Database:
                     title.update(
                         evidence.details.get("titles", {}).get(str(title["title_index"]), {})
                     )
+            assignments = session.scalar(
+                select(Event)
+                .where(Event.job_id == job_id, Event.message == "Episode assignments confirmed")
+                .order_by(Event.id.desc())
+                .limit(1)
+            )
+            result["episode_assignments"] = (
+                assignments.details.get("assignments", []) if assignments else []
+            )
             return result
 
     def add_event(

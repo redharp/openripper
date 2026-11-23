@@ -43,6 +43,8 @@ def test_keys_are_private_preserved_on_normal_save_and_not_reused_for_new_url(
 ):
     settings = Settings(
         library_root=tmp_path / "rips",
+        movie_root=tmp_path / "rips" / "Movies",
+        tv_root=tmp_path / "rips" / "TV",
         database_url=f"sqlite:///{tmp_path / 'db'}",
         preferences_path=tmp_path / "settings.json",
         auto_rip=False,
@@ -61,7 +63,8 @@ def test_keys_are_private_preserved_on_normal_save_and_not_reused_for_new_url(
         public.pop("key_configured")
         assert client.put("/api/integrations/radarr", json=public).status_code == 200
         prefs = client.get("/api/settings").json()
-        assert client.put("/api/settings", json=prefs).status_code == 200
+        saved = client.put("/api/settings", json=prefs)
+        assert saved.status_code == 200, saved.text
         assert (
             json.loads(settings.preferences_path.read_text())["integrations"]["radarr"]["api_key"]
             == "test-only-key"
@@ -284,3 +287,25 @@ async def test_sonarr_rejects_wrong_episode_assignment_before_import(tmp_path, m
             job, 7, [{"title_id": job["titles"][0]["id"], "episode_ids": [999]}]
         )
     assert not server.commands
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("episode, expected", [(2, "complete"), (99, "failed")])
+async def test_sonarr_reuses_confirmed_matching_without_guessing(
+    tmp_path, monkeypatch, episode, expected
+):
+    service, job = await completed_service(tmp_path)
+    service.database.update_job(job["id"], media_type="tv")
+    service.database.add_event(
+        "Episode assignments confirmed",
+        job_id=job["id"],
+        details={"assignments": [dict(title_id=job["titles"][0]["id"], season=1, episode=episode)]},
+    )
+    server = ArrServer(job, "sonarr")
+    install_server(monkeypatch, server)
+    await service.handoffs.auto(job["id"])
+    await drain(service)
+    result = service.database.job_detail(job["id"])
+    assert handoff_state(result)["status"] == expected
+    assert result["status"] == "complete"
+    assert len(server.commands) == (2 if expected == "complete" else 0)

@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from openripper.api import create_app
@@ -73,7 +74,7 @@ def test_advanced_settings_validate_and_persist_without_partial_updates(tmp_path
             {"tv_root": "relative"},
             {"preferred_languages": "English"},
             {"max_concurrent_rips": 0},
-            {"disc_folder_template": "{disc}"},
+            {"disc_folder_template": "../{disc}"},
         ):
             assert client.put("/api/settings", json={**values, **bad}).status_code == 422
         assert client.get("/api/settings").json() == values
@@ -91,6 +92,29 @@ def test_environment_sets_default_media_roots(tmp_path, monkeypatch):
     assert settings.library_root == tmp_path / "library"
     assert settings.movie_root == tmp_path / "library" / "Movies"
     assert settings.tv_root == tmp_path / "library" / "TV"
+
+
+def test_library_automation_defaults_preserve_existing_choices(tmp_path, monkeypatch):
+    preferences = tmp_path / "preferences.json"
+    monkeypatch.setenv("OPENRIPPER_PREFERENCES_PATH", str(preferences))
+    for name in ("AUTO_RIP", "OUTPUT_MODE", "ARTWORK_ENABLED", "FFMPEG_BIN"):
+        monkeypatch.delenv(f"OPENRIPPER_{name}", raising=False)
+    settings = Settings.from_env()
+    assert (settings.auto_rip, settings.output_mode, settings.artwork_enabled) == (
+        True, "library", True
+    )
+
+    preferences.write_text(json.dumps({
+        "auto_rip": False, "output_mode": "disc", "artwork_enabled": False,
+        "ffmpeg_bin": "custom-ffmpeg",
+    }))
+    settings = Settings.from_env()
+    assert (settings.auto_rip, settings.output_mode, settings.artwork_enabled) == (
+        False, "disc", False
+    )
+    assert settings.ffmpeg_bin == "custom-ffmpeg"
+    monkeypatch.setenv("OPENRIPPER_FFMPEG_BIN", "override-ffmpeg")
+    assert Settings.from_env().ffmpeg_bin == "override-ffmpeg"
 
 
 def test_cannot_change_destination_during_rip(tmp_path):
@@ -116,3 +140,16 @@ def test_cannot_change_destination_during_rip(tmp_path):
         values["max_concurrent_rips"] = 4
         assert client.put("/api/settings", json=values).status_code == 200
         assert client.get("/api/overview").json()["runtime"]["max_concurrent_rips"] == 4
+
+
+@pytest.mark.parametrize(
+    "template, expected",
+    [("{disc} - {job_id}", "{disc}"), ("{title} ({year})", "{title} ({year})")],
+)
+def test_existing_default_folder_template_upgrades_without_replacing_custom_names(
+    tmp_path, monkeypatch, template, expected
+):
+    preferences = tmp_path / "settings.json"
+    preferences.write_text(json.dumps({"disc_folder_template": template}))
+    monkeypatch.setenv("OPENRIPPER_PREFERENCES_PATH", str(preferences))
+    assert Settings.from_env().disc_folder_template == expected
