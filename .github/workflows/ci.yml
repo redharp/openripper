@@ -40,6 +40,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Actions are pinned to commit hashes
+        run: |
+          # A tag such as @v4 can be moved to different code after review; a full commit hash cannot.
+          unpinned=$(grep -rnE '^[[:space:]]*(-[[:space:]]+)?uses:' .github/workflows \
+            | grep -vE 'uses:[[:space:]]+[^@[:space:]]+@[0-9a-f]{40}([[:space:]]|$)' \
+            | grep -vE 'uses:[[:space:]]+(\./|docker://)' || true)
+          if [ -n "$unpinned" ]; then
+            echo "Pin these actions to a full commit hash, with the version as a comment:"
+            echo "$unpinned"
+            exit 1
+          fi
       - run: docker compose config --quiet
       - run: docker compose -f compose.yaml -f compose.simulate.yaml config --quiet
       - run: docker compose -f compose.yaml -f compose.devices.example.yaml config --quiet

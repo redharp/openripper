@@ -10,6 +10,10 @@ Name branches `<type>/<short-kebab-topic>`, such as `docs/agents-md-standardizat
 - If a tool creates a branch with its own prefix, run `git branch -m <type>/<topic>` before pushing.
 - The shape matches `^(feat|fix|chore|docs|refactor|test|ci|perf|release|research)/[a-z0-9]+(-[a-z0-9]+){0,4}$`. The 40-character topic limit also applies.
 
+## GitHub Actions
+
+Pin every `uses:` to a full 40-character commit hash, followed by the version as a comment (`actions/checkout@<sha> # v7.0.1`), never a tag or branch. Tags can be moved to different code after review; CI fails on an unpinned action. Dependabot keeps the hashes and comments current.
+
 ## No tautological work
 
 Add a test, document, comment, label or UI element only when you can name the concrete failure or question it addresses. Zero new tests or docs are acceptable when no concrete regression or question calls for them.
