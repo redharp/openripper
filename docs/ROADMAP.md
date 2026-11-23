@@ -2,17 +2,17 @@
 
 These are requested follow-ups, not implemented capabilities.
 
-## Reliability first
+## Reliability and post-rip quality
 
-- Verify completed outputs with a media probe and optional checksum manifest.
-- Recover interrupted jobs at the last safe stage; never treat a partial file as complete.
-- Distinguish a duplicate disc from a deliberate rerip, with explicit recovery choices.
+- Direct-to-destination ripping without redundant temp-staging moves, cleaning up partial files cleanly on failure so interrupted rips simply restart fresh.
+- Accurate movie/episode naming, metadata matching, and cover art/thumbnails that work seamlessly with Jellyfin, Plex, Sonarr, and Radarr instead of overriding scanner artwork.
 - Check available space and mounted-share health before starting work.
+- Distinguish a duplicate disc from a deliberate rerip, with explicit choices.
 
 ## Queue control
 
 - Reorder waiting discs and pause new starts without cancelling active jobs.
-- A separate encode queue and concurrency limit so optical drives stay available.
+- A separate HandBrake encode queue and concurrency limit so optical drives stay available.
 - Clear scheduling reasons and estimates based on observed throughput.
 
 ## Notifications

@@ -445,11 +445,14 @@ class MakeMKVBackend:
                 **process_group_options(),
             )
         except FileNotFoundError as exc:
+            if profile_path:
+                profile_path.unlink(missing_ok=True)
             raise MakeMKVError(f"{self.binary} was not found") from exc
         assert process.stdout
         messages: list[str] = []
         log_path = destination / "makemkv.log"
         progress_pattern = re.compile(r"^PRGV:(\d+),(\d+),(\d+)")
+        succeeded = False
         try:
             with log_path.open("w", encoding="utf-8", buffering=1) as output_log:
                 async for raw_line in process.stdout:
@@ -465,20 +468,25 @@ class MakeMKVBackend:
                         denominator = maximum or total or 1
                         await progress(min(1.0, current / denominator), "Ripping title")
             return_code = await process.wait()
+            if return_code:
+                raise MakeMKVError(makemkv_failure(messages, "MakeMKV rip failed"))
+            created = list(set(destination.glob("*.mkv")) - before)
+            if not created:
+                raise MakeMKVError(
+                    makemkv_failure(messages, "MakeMKV finished but no MKV file was created")
+                )
+            succeeded = True
+            return max(created, key=lambda path: path.stat().st_mtime)
         except asyncio.CancelledError:
             await stop_process(process)
             raise
-        if return_code:
-            raise MakeMKVError(makemkv_failure(messages, "MakeMKV rip failed"))
-        created = list(set(destination.glob("*.mkv")) - before)
-        if not created:
-            raise MakeMKVError(
-                makemkv_failure(messages, "MakeMKV finished but no MKV file was created")
-            )
-        log_path.unlink(missing_ok=True)
-        if profile_path:
-            profile_path.unlink(missing_ok=True)
-        return max(created, key=lambda path: path.stat().st_mtime)
+        finally:
+            log_path.unlink(missing_ok=True)
+            if profile_path:
+                profile_path.unlink(missing_ok=True)
+            if not succeeded:
+                for partial in set(destination.glob("*.mkv")) - before:
+                    partial.unlink(missing_ok=True)
 
     async def eject(self, device: str) -> None:
         if not device:
