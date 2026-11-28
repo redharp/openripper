@@ -117,6 +117,38 @@ async def test_movie_staging_uses_drive_override_parent(tmp_path, monkeypatch):
     assert not list((override / "Movies").rglob("*.mkv"))
 
 
+@pytest.mark.asyncio
+async def test_confident_movie_rips_directly_to_destination_without_staging(tmp_path, monkeypatch):
+    ripped_into = []
+    service = make_service(tmp_path, output_mode="library", rip_mode="all")
+
+    async def scan(device):
+        return [TitleInfo(index=0, name="Feature", duration_seconds=7200)]
+
+    async def rip(device, title_index, destination, progress):
+        ripped_into.append(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        path = destination / "raw_title_0.mkv"
+        path.write_bytes(b"video-0")
+        await progress(1, "Done")
+        return path
+
+    async def metadata(disc_name, titles, *, media_type=None):
+        return MetadataMatch("Example", 2020, confidence=0.99, source="tmdb")
+
+    monkeypatch.setattr(service.backend, "scan_disc", scan)
+    monkeypatch.setattr(service.backend, "rip_title", rip)
+    monkeypatch.setattr(service.metadata, "resolve", metadata)
+    await service.poll_once()
+    await finish(service)
+    job = service.database.job_detail(service.database.fetchone("SELECT id FROM jobs")["id"])
+    expected_dir = service.settings.movie_root / "Example (2020)"
+    assert job["status"] == "complete", job["error"]
+    assert ripped_into == [expected_dir]
+    assert not service.settings.staging_root.exists()
+    assert (expected_dir / "Example (2020).mkv").read_bytes() == b"video-0"
+
+
 def test_disc_folder_movie_staging_remains_on_destination_filesystem(tmp_path):
     service = make_service(tmp_path, output_mode="disc")
     root = tmp_path / "mounted-movie-root"

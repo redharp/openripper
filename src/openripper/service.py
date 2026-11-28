@@ -137,28 +137,47 @@ class RipperService:
 
     async def start(self) -> None:
         self.database.initialize()
-        recovered = self.database.execute(
+        interrupted = self.database.fetchall(
             """
-            UPDATE jobs
-            SET status='failed', error='Interrupted by service restart', completed_at=?
+            SELECT id, stage_path FROM jobs
             WHERE status IN ('scanning','queued','ripping','publishing')
-            """,
-            (now_iso(),),
+            """
         )
-        if recovered:
+        if interrupted:
+            self.database.execute(
+                """
+                UPDATE jobs
+                SET status='failed', error='Interrupted by service restart', completed_at=?
+                WHERE status IN ('scanning','queued','ripping','publishing')
+                """,
+                (now_iso(),),
+            )
+            for row in interrupted:
+                self._cleanup_staging(row["stage_path"])
+            count = len(interrupted)
             self.database.add_event(
-                f"Recovered {recovered} interrupted ingest job{'s' if recovered != 1 else ''}",
+                f"Cleared {count} interrupted ingest job{'s' if count != 1 else ''}",
                 level="warning",
             )
         self.settings.library_root.mkdir(parents=True, exist_ok=True)
         if self.settings.output_mode == "library":
             self.settings.movie_root.mkdir(parents=True, exist_ok=True)
             self.settings.tv_root.mkdir(parents=True, exist_ok=True)
-        self.settings.staging_root.mkdir(parents=True, exist_ok=True)
         await self.handoffs.resume()
         self._watcher = asyncio.create_task(self._watch_loop(), name="disc-watcher")
         if self.settings.udev_discovery:
             self._udev_watcher = asyncio.create_task(self._udev_loop(), name="udev-optical-watcher")
+
+    def _cleanup_staging(self, stage_path: str) -> None:
+        if not stage_path:
+            return
+        path = Path(stage_path)
+        if ".openripper-staging" not in path.parts:
+            return
+        shutil.rmtree(path, ignore_errors=True)
+        shutil.rmtree(path.with_name(f"{path.name}.attempts"), ignore_errors=True)
+        with suppress(OSError):
+            path.parent.rmdir()
 
     async def stop(self) -> None:
         if self._watcher:
@@ -562,129 +581,161 @@ class RipperService:
         )
         await self.broadcast()
 
+    def _rip_directory(self, job: dict) -> tuple[Path, bool]:
+        """Rip straight to the final destination when known and unoccupied."""
+        if job["media_type"] != "tv":
+            destination = self.destination_folder(job)
+            if self.settings.output_mode == "disc":
+                if destination.exists():
+                    raise FileExistsError(f"Refusing to overwrite {destination}")
+                return destination, True
+            can_publish = (
+                bool(job["title"])
+                and job["metadata_confidence"] >= self.settings.auto_publish_confidence
+                and not movie_selection_error(job["titles"])
+            )
+            if can_publish and not destination.exists():
+                return destination, True
+        stage = (
+            Path(job["stage_path"])
+            if job.get("stage_path")
+            else self.staging_folder(job["drive_id"], job["media_type"], job["id"])
+        )
+        return stage, False
+
     async def _rip(self, job_id: str, drive: DriveInfo, selected_titles: list[TitleInfo]) -> None:
         current = self.database.job_detail(job_id)
-        stage = Path(current["stage_path"]) if current else self.settings.staging_root / job_id
-        stage.mkdir(parents=True, exist_ok=True)
-        completed = set()
-        for title in current["titles"] if current else ():
-            if title["ripped_path"]:
-                path = Path(title["ripped_path"])
-                if path.is_file() and path.stat().st_size:
-                    completed.add(title["title_index"])
+        assert current
+        # Interrupted or failed rips always restart fresh rather than resuming partial output.
+        self.database.execute("UPDATE titles SET ripped_path='' WHERE job_id=?", (job_id,))
+        work_dir, direct = self._rip_directory(current)
+        if not direct and work_dir.exists():
+            # Clear stale partials from any earlier failed attempt in this working folder.
+            for stale in work_dir.glob("*.mkv"):
+                with suppress(OSError):
+                    stale.unlink()
+        created_dir = not work_dir.exists()
+        work_dir.mkdir(parents=True, exist_ok=True)
         if not self.settings.simulate:
-            with tempfile.TemporaryFile(dir=stage):
-                pass
-            estimate = sum(
-                title.size_bytes for title in selected_titles if title.index not in completed
-            )
-            if estimate > 0:
-                _check_space(stage, estimate)
+            try:
+                with tempfile.TemporaryFile(dir=work_dir):
+                    pass
+                estimate = sum(title.size_bytes for title in selected_titles)
+                if estimate > 0:
+                    _check_space(work_dir, estimate)
+            except BaseException:
+                if created_dir:
+                    with suppress(OSError):
+                        work_dir.rmdir()
+                raise
         self.database.update_job(
             job_id,
             status="ripping",
             progress=0,
             started_at=now_iso(),
-            stage_path=str(stage),
+            stage_path=str(work_dir),
         )
-        attempts = stage.with_name(f"{stage.name}.attempts")
-        meter = TransferMeter(time.monotonic(), stage_bytes(stage))
+        meter = TransferMeter(time.monotonic(), stage_bytes(work_dir))
         expected_bytes = sum(title.size_bytes for title in selected_titles)
-        for offset, title in enumerate(selected_titles):
-            if title.index in completed:
-                continue
-            reported_value = 0.0
+        created_files: list[Path] = []
+        try:
+            for offset, title in enumerate(selected_titles):
+                reported_value = 0.0
 
-            async def report(value: float, message: str, *, current: int = offset) -> None:
-                nonlocal reported_value
-                if message.startswith("Disc read error"):
-                    telemetry = self._telemetry.setdefault(job_id, {})
-                    if telemetry.get("read_warning") != message:
-                        self.database.add_event(message, job_id=job_id, level="warning")
-                    telemetry["read_warning"] = message
+                async def report(value: float, message: str, *, current: int = offset) -> None:
+                    nonlocal reported_value
+                    if message.startswith("Disc read error"):
+                        telemetry = self._telemetry.setdefault(job_id, {})
+                        if telemetry.get("read_warning") != message:
+                            self.database.add_event(message, job_id=job_id, level="warning")
+                        telemetry["read_warning"] = message
+                        await self.broadcast()
+                        return
+                    measured = max(0.0, min(1.0, value))
+                    if measured <= reported_value:
+                        return
+                    reported_value = measured
+                    overall = (current + reported_value) / len(selected_titles)
+                    self.database.update_job(job_id, progress=round(overall, 4))
                     await self.broadcast()
-                    return
-                measured = max(0.0, min(1.0, value))
-                if measured <= reported_value:
-                    return
-                reported_value = measured
-                overall = (current + reported_value) / len(selected_titles)
-                self.database.update_job(job_id, progress=round(overall, 4))
+
+                before_mkvs = set(work_dir.glob("*.mkv"))
+                baseline_bytes = stage_bytes(work_dir)
+                telemetry = {
+                    "title_number": offset + 1,
+                    "title_count": len(selected_titles),
+                    "title_name": title.name or f"Title {title.index}",
+                }
+                if not self.settings.simulate:
+                    telemetry["phase"] = "opening_title"
+                self._telemetry[job_id] = telemetry
                 await self.broadcast()
-
-            baseline_bytes = stage_bytes(stage)
-            attempts.mkdir(exist_ok=True)
-            attempt = Path(tempfile.mkdtemp(prefix=f"title-{title.index}-", dir=attempts))
-            telemetry = {
-                "title_number": offset + 1,
-                "title_count": len(selected_titles),
-                "title_name": title.name or f"Title {title.index}",
-            }
-            if not self.settings.simulate:
-                telemetry["phase"] = "opening_title"
-            self._telemetry[job_id] = telemetry
-            await self.broadcast()
-            previous_attempt_bytes = 0
-            rip_task = asyncio.create_task(
-                self.backend.rip_title(drive.device, title.index, attempt, report),
-                name=f"makemkv-{job_id}-{title.index}",
-            )
-            try:
-                while not rip_task.done():
-                    await asyncio.wait({rip_task}, timeout=2)
-                    attempt_bytes = stage_bytes(attempt)
-                    telemetry.update(
-                        meter.sample(
-                            time.monotonic(), baseline_bytes + attempt_bytes, expected_bytes
+                previous_attempt_bytes = 0
+                rip_task = asyncio.create_task(
+                    self.backend.rip_title(drive.device, title.index, work_dir, report),
+                    name=f"makemkv-{job_id}-{title.index}",
+                )
+                try:
+                    while not rip_task.done():
+                        await asyncio.wait({rip_task}, timeout=2)
+                        attempt_bytes = max(0, stage_bytes(work_dir) - baseline_bytes)
+                        telemetry.update(
+                            meter.sample(
+                                time.monotonic(), baseline_bytes + attempt_bytes, expected_bytes
+                            )
                         )
-                    )
-                    if attempt_bytes > previous_attempt_bytes:
-                        telemetry.pop("phase", None)
-                        telemetry.pop("read_warning", None)
-                    previous_attempt_bytes = attempt_bytes
-                    if title.size_bytes > 0:
-                        await report(min(0.995, attempt_bytes / title.size_bytes), "Ripping title")
-                    await self.broadcast()
-                output = await rip_task
-                if (
-                    output.parent != attempt
-                    or output.suffix.lower() != ".mkv"
-                    or not output.is_file()
-                    or not output.stat().st_size
-                ):
-                    raise MakeMKVError("Ripping finished without a non-empty MKV")
-                await self._verify_video(output, job_id=job_id)
-                staged = stage / output.name
-                if staged.exists():
-                    staged = stage / f"{output.stem} - t{title.index:02d}{output.suffix}"
-                if staged.exists():
-                    raise FileExistsError(f"Ripped title could not be staged: {staged.name}")
-                output.rename(staged)
+                        if attempt_bytes > previous_attempt_bytes:
+                            telemetry.pop("phase", None)
+                            telemetry.pop("read_warning", None)
+                        previous_attempt_bytes = attempt_bytes
+                        if title.size_bytes > 0:
+                            await report(
+                                min(0.995, attempt_bytes / title.size_bytes), "Ripping title"
+                            )
+                        await self.broadcast()
+                    output = await rip_task
+                    if (
+                        output.parent != work_dir
+                        or output.suffix.lower() != ".mkv"
+                        or not output.is_file()
+                        or not output.stat().st_size
+                    ):
+                        raise MakeMKVError("Ripping finished without a non-empty MKV")
+                    await self._verify_video(output, job_id=job_id)
+                except BaseException:
+                    if not rip_task.done():
+                        rip_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await rip_task
+                    for partial in set(work_dir.glob("*.mkv")) - before_mkvs:
+                        with suppress(OSError):
+                            partial.unlink()
+                    raise
+                created_files.append(output)
                 self.database.execute(
                     "UPDATE titles SET ripped_path=? WHERE job_id=? AND title_index=?",
-                    (str(staged), job_id, title.index),
+                    (str(output), job_id, title.index),
                 )
-            finally:
-                if not rip_task.done():
-                    rip_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await rip_task
+                await report(1.0, "Finished title")
+                self.database.add_event(
+                    f"Finished title {title.index}",
+                    job_id=job_id,
+                    details={"file": output.name},
+                )
+        except BaseException:
+            for path in created_files:
                 with suppress(OSError):
-                    attempt.rmdir()
-                    attempts.rmdir()
-                if attempt.exists():
-                    self.database.add_event(
-                        "Kept unverified rip files and diagnostics",
-                        job_id=job_id,
-                        level="warning",
-                        details={"path": str(attempt)},
-                    )
-            await report(1.0, "Finished title")
-            self.database.add_event(
-                f"Finished title {title.index}",
-                job_id=job_id,
-                details={"file": staged.name},
-            )
+                    path.unlink(missing_ok=True)
+            for leftover in ("makemkv.log", "openripper.mmcp.xml"):
+                with suppress(OSError):
+                    (work_dir / leftover).unlink(missing_ok=True)
+            self.database.execute("UPDATE titles SET ripped_path='' WHERE job_id=?", (job_id,))
+            if created_dir:
+                with suppress(OSError):
+                    work_dir.rmdir()
+                    if ".openripper-staging" in work_dir.parts:
+                        work_dir.parent.rmdir()
+            raise
         self.database.update_job(job_id, progress=1)
         if self.settings.handbrake_enabled:
             await self._encode_job(job_id)
@@ -780,44 +831,32 @@ class RipperService:
             if title["selected"]:
                 source = Path(title["ripped_path"])
                 if source.parent != stage or not source.is_file() or not source.stat().st_size:
-                    raise ValueError("All selected titles must have a non-empty file in staging")
-        if destination.exists():
-            raise FileExistsError(f"Refusing to overwrite {destination}")
-        self.database.update_job(job_id, status="publishing")
-        await self.broadcast()
-        # Staging is under the configured destination, so this is one filesystem rename.
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        # Recheck after broadcasting: another drive may have published this name.
-        if destination.exists():
-            raise FileExistsError(f"Refusing to overwrite {destination}")
-        # Older versions could leave partial files directly in the staging folder.
-        saved = {Path(t["ripped_path"]) for t in job["titles"] if t["ripped_path"]}
-        if self.settings.handbrake_keep_original:
-            saved.update(
-                path.with_name(path.name.removesuffix(".encoded.mkv") + ".mkv")
-                for path in tuple(saved)
-                if path.name.endswith(".encoded.mkv")
-            )
-        unverified = {path for path in stage.iterdir() if path.suffix.lower() == ".mkv"} - saved
-        if unverified:
-            attempts = stage.with_name(f"{stage.name}.attempts")
-            attempts.mkdir(exist_ok=True)
-            retained = Path(tempfile.mkdtemp(prefix="previous-", dir=attempts))
-            for path in unverified:
-                path.rename(retained / path.name)
-            self.database.add_event(
-                "Kept unverified files from earlier rip attempts",
-                job_id=job_id,
-                level="warning",
-                details={"path": str(retained)},
-            )
-        stage.rename(destination)
-        for title in job["titles"]:
-            if title["ripped_path"]:
-                self.database.execute(
-                    "UPDATE titles SET ripped_path=? WHERE id=?",
-                    (str(destination / Path(title["ripped_path"]).name), title["id"]),
+                    raise ValueError("All selected titles must have a non-empty ripped file")
+        if stage != destination:
+            if destination.exists():
+                raise FileExistsError(f"Refusing to overwrite {destination}")
+            self.database.update_job(job_id, status="publishing")
+            await self.broadcast()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                raise FileExistsError(f"Refusing to overwrite {destination}")
+            saved = {Path(t["ripped_path"]) for t in job["titles"] if t["ripped_path"]}
+            if self.settings.handbrake_keep_original:
+                saved.update(
+                    path.with_name(path.name.removesuffix(".encoded.mkv") + ".mkv")
+                    for path in tuple(saved)
+                    if path.name.endswith(".encoded.mkv")
                 )
+            for stray in {p for p in stage.iterdir() if p.suffix.lower() == ".mkv"} - saved:
+                with suppress(OSError):
+                    stray.unlink()
+            stage.rename(destination)
+            for title in job["titles"]:
+                if title["ripped_path"]:
+                    self.database.execute(
+                        "UPDATE titles SET ripped_path=? WHERE id=?",
+                        (str(destination / Path(title["ripped_path"]).name), title["id"]),
+                    )
         self.database.update_job(
             job_id,
             status="complete",
@@ -984,50 +1023,59 @@ class RipperService:
             if source != destination:
                 if destination.exists():
                     raise FileExistsError(f"Refusing to overwrite {destination}")
-                # A fresh name keeps incomplete copies from blocking later attempts.
-                temporary = destination.with_name(f".{uuid.uuid4().hex}.pending")
-                size = source.stat().st_size
-                copied = False
-                try:
-                    source.rename(temporary)
-                except OSError as exc:
-                    if exc.errno != errno.EXDEV:
-                        raise
-                    # Keep the original until the copy is verified and promoted.
-                    _check_space(destination.parent, size)
-                    await asyncio.to_thread(_copy_for_publication, source, temporary)
-                    copied = True
-                if not copied:
-                    self.database.execute(
-                        "UPDATE titles SET ripped_path=? WHERE id=?", (str(temporary), title["id"])
-                    )
-                try:
-                    if temporary.stat().st_size != size:
-                        raise OSError("Published copy size differs from the staged video")
-                    if destination.exists():
-                        raise FileExistsError(f"Refusing to overwrite {destination}")
-                    if assignments:
-                        check_existing_episodes(
-                            destination.parent, assignments[title["id"]], temporary
-                        )
-                    temporary.rename(destination)
+                if source.parent == destination.parent:
+                    # Direct-to-destination rip: one instant in-place rename, no staging copy.
+                    source.rename(destination)
                     self.database.execute(
                         "UPDATE titles SET ripped_path=? WHERE id=?",
                         (str(destination), title["id"]),
                     )
-                finally:
-                    if copied:
-                        with suppress(OSError):
-                            temporary.unlink(missing_ok=True)
-                if copied:
+                else:
+                    # A fresh name keeps incomplete copies from blocking later attempts.
+                    temporary = destination.with_name(f".{uuid.uuid4().hex}.pending")
+                    size = source.stat().st_size
+                    copied = False
                     try:
-                        source.unlink()
+                        source.rename(temporary)
                     except OSError as exc:
-                        self.database.add_event(
-                            f"Published video; staged copy could not be removed: {exc}",
-                            job_id=job_id,
-                            level="warning",
+                        if exc.errno != errno.EXDEV:
+                            raise
+                        # Keep the original until the copy is verified and promoted.
+                        _check_space(destination.parent, size)
+                        await asyncio.to_thread(_copy_for_publication, source, temporary)
+                        copied = True
+                    if not copied:
+                        self.database.execute(
+                            "UPDATE titles SET ripped_path=? WHERE id=?",
+                            (str(temporary), title["id"]),
                         )
+                    try:
+                        if temporary.stat().st_size != size:
+                            raise OSError("Published copy size differs from the staged video")
+                        if destination.exists():
+                            raise FileExistsError(f"Refusing to overwrite {destination}")
+                        if assignments:
+                            check_existing_episodes(
+                                destination.parent, assignments[title["id"]], temporary
+                            )
+                        temporary.rename(destination)
+                        self.database.execute(
+                            "UPDATE titles SET ripped_path=? WHERE id=?",
+                            (str(destination), title["id"]),
+                        )
+                    finally:
+                        if copied:
+                            with suppress(OSError):
+                                temporary.unlink(missing_ok=True)
+                    if copied:
+                        try:
+                            source.unlink()
+                        except OSError as exc:
+                            self.database.add_event(
+                                f"Published video; staged copy could not be removed: {exc}",
+                                job_id=job_id,
+                                level="warning",
+                            )
 
             published.append(destination)
         stage = Path(job["stage_path"])

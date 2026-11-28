@@ -76,7 +76,7 @@ async def test_enabling_automatic_ripping_starts_a_persisted_waiting_disc_once(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interruption", ["failure", "cancel", "empty"])
-async def test_retry_publishes_only_complete_titles(tmp_path, monkeypatch, interruption):
+async def test_retry_cleans_partials_and_starts_fresh(tmp_path, monkeypatch, interruption):
     service = make_service(tmp_path, rip_mode="all")
     interrupted = asyncio.Event()
     attempts = []
@@ -110,24 +110,21 @@ async def test_retry_publishes_only_complete_titles(tmp_path, monkeypatch, inter
     await finish(service)
     job = service.database.job_detail(job_id)
     assert job["status"] == ("cancelled" if interruption == "cancel" else "failed")
-    assert not job["titles"][1]["ripped_path"]
+    assert all(not title["ripped_path"] for title in job["titles"])
+    assert not list(service.settings.library_root.rglob("*.mkv"))
 
-    # Older releases could leave unidentified output directly in the staging folder.
-    legacy_partial = Path(job["stage_path"]) / "orphan.mkv"
-    legacy_partial.write_bytes(b"legacy partial")
     await service.retry_job(job_id)
     await finish(service)
     job = service.database.job_detail(job_id)
     assert job["status"] == "complete", job["error"]
-    assert attempts == [0, 1, 1]
+    assert attempts == [0, 1, 0, 1]
     folder = Path(job["final_path"])
+    assert folder == service.settings.movie_root / "MY_DVD"
+    assert not (service.settings.movie_root / ".openripper-staging").exists()
     assert {p.name: p.read_bytes() for p in folder.glob("*.mkv")} == {
         "title0.mkv": b"complete title 0",
         "title1.mkv": b"complete title 1",
     }
-    retained = [p.read_bytes() for p in folder.parent.rglob("*.mkv") if folder not in p.parents]
-    assert b"legacy partial" in retained
-    assert (b"" if interruption == "empty" else b"partial") in retained
 
 
 @pytest.mark.asyncio
@@ -290,8 +287,7 @@ async def test_invalid_video_is_retained_without_publication(tmp_path, monkeypat
     assert "Output verification failed" in job["error"]
     assert not job["titles"][0]["ripped_path"]
     assert not job["final_path"]
-    (retained,) = service.settings.movie_root.rglob("*.mkv")
-    assert retained.read_bytes() == b"test video contents"
+    assert not list(service.settings.movie_root.rglob("*.mkv"))
 
 
 @pytest.mark.asyncio
@@ -339,7 +335,7 @@ async def test_disc_folder_uses_label_and_duplicate_preserves_both_rips(tmp_path
     assert {job["status"] for job in jobs} == {"complete", "failed"}
     duplicate = next(job for job in jobs if job["status"] == "failed")
     assert "Refusing to overwrite" in duplicate["error"]
-    assert (Path(duplicate["stage_path"]) / "title00.mkv").exists()
+    assert not (service.settings.movie_root / ".openripper-staging").exists()
     assert Path(first["final_path"]).name == "MY_DVD"
     assert original.read_bytes() == b"test video contents"
 
@@ -426,7 +422,7 @@ async def test_eject_failure_does_not_fail_saved_rip(tmp_path):
 
 @pytest.mark.asyncio
 async def test_polling_reads_os_media_without_udev(tmp_path, monkeypatch):
-    service = make_service(tmp_path)
+    service = make_service(tmp_path, verify_video=False)
     service.settings.simulate = False
     service.backend.label = ""
     monkeypatch.setattr("openripper.service.optical_media_labels", lambda: {"/dev/sr0": "DVD"})
@@ -439,15 +435,15 @@ async def test_polling_reads_os_media_without_udev(tmp_path, monkeypatch):
 async def test_existing_destination_is_never_overwritten(tmp_path):
     service = make_service(tmp_path)
     await service.poll_once()
-    job = service.database.overview()["active_jobs"][0]
     occupied = service.settings.movie_root / "MY_DVD"
     occupied.mkdir(parents=True)
     (occupied / "keep.txt").write_text("keep")
     await finish(service)
-    job = service.database.job_detail(job["id"])
+    job = service.database.job_detail(service.database.fetchone("SELECT id FROM jobs")["id"])
     assert job["status"] == "failed"
+    assert "Refusing to overwrite" in job["error"]
     assert (occupied / "keep.txt").read_text() == "keep"
-    assert (Path(job["stage_path"]) / "title00.mkv").exists()
+    assert not list(occupied.glob("*.mkv"))
 
 
 @pytest.mark.asyncio
