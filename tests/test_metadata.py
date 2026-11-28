@@ -9,6 +9,7 @@ from openripper.metadata import (
     disc_season,
     episode_structure,
     resolve_library_movie,
+    resolve_library_series,
 )
 
 
@@ -339,8 +340,38 @@ async def test_poster_uses_confirmed_release_year(monkeypatch, tmp_path):
         {"id": 2, "title": "Example", "release_date": "2020-01-01", "poster_path": "/new.jpg"},
     ])
     assert await MetadataResolver("test").save_poster(tmp_path, "Example", 2020, "movie")
-    assert requests[-1].url.path == "/t/p/w500/new.jpg"
+    assert requests[-1].url.path == "/t/p/w780/new.jpg"
     assert (tmp_path / "poster.jpg").read_bytes() == b"\xff\xd8test-poster"
+
+
+@pytest.mark.asyncio
+async def test_managed_series_lookup_resolves_unique_sonarr_show(monkeypatch):
+    series = [{"id": 1, "title": "Example Show", "year": 2020}]
+    calls = []
+
+    async def respond(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json=series)
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        "openripper.arr.httpx.AsyncClient",
+        lambda **kw: original(transport=httpx.MockTransport(respond), **kw),
+    )
+    match = await resolve_library_series(
+        "EXAMPLE_SHOW_S02_D1",
+        [TitleInfo(index=0, name="Episode 1", duration_seconds=2700)],
+        ArrConfig(url="https://sonarr.example.test", api_key="test-key"),
+    )
+    assert calls == [("GET", "/api/v3/series")]
+    assert match is not None
+    assert (match.title, match.year, match.media_type, match.source) == (
+        "Example Show",
+        2020,
+        "tv",
+        "sonarr",
+    )
+    assert match.confidence >= 0.88
 
 
 @pytest.mark.asyncio

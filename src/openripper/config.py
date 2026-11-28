@@ -88,6 +88,10 @@ class Settings:
     def staging_root(self) -> Path:
         return self.library_root / ".openripper-staging"
 
+    @property
+    def artwork_cache_root(self) -> Path:
+        return self.preferences_path.parent / "artwork"
+
     @classmethod
     def from_env(cls) -> Settings:
         library_root = Path(_env("OPENRIPPER_LIBRARY_ROOT", "/media/library")).expanduser()

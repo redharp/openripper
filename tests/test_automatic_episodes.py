@@ -71,6 +71,34 @@ def test_explicit_episode_selection_disagrees_with_conflicting_season():
     assert not has_explicit_episode("Example Show S02E01-E02", season=3)
 
 
+def test_automatic_episode_matching_preserves_episode_titles_and_x_notation():
+    rows = [
+        title(10, "Example Show - S02E04 - The Long Road"),
+        title(20, "Example Show 2x05: Second Wind"),
+        title(30, "Example Show S02E06 - Main Feature"),
+    ]
+    assert automatic_episode_assignments(rows, season=2, disc_name="EXAMPLE_S02_D2") == [
+        {
+            "title_id": 10,
+            "season": 2,
+            "episode": 4,
+            "episode_end": 4,
+            "episode_title": "The Long Road",
+        },
+        {
+            "title_id": 20,
+            "season": 2,
+            "episode": 5,
+            "episode_end": 5,
+            "episode_title": "Second Wind",
+        },
+        {"title_id": 30, "season": 2, "episode": 6, "episode_end": 6},
+    ]
+    # Aspect ratios and resolutions must never be mistaken for episode codes.
+    assert not has_explicit_episode("Example Show 1920x1080")
+    assert not has_explicit_episode("Example Show 4x3")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "confidence, second_name, second_duration, publishes",

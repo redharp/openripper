@@ -219,6 +219,54 @@ async def resolve_library_movie(
     )
 
 
+async def resolve_library_series(
+    disc_name: str, titles: Sequence[TitleInfo], config: ArrConfig
+) -> MetadataMatch | None:
+    """Use a unique TV series already managed by Sonarr."""
+    if not config.url or not config.api_key.get_secret_value():
+        return None
+    title, year = disc_title(disc_name)
+    if generic_disc_name(title):
+        return None
+    label_keys = {normalized_title(title)}
+    prefix = MASTERING_SUFFIX.sub("", disc_name)
+    if prefix != disc_name:
+        prefix_title, prefix_year = disc_title(prefix)
+        if not generic_disc_name(prefix_title):
+            label_keys.add(normalized_title(prefix_title))
+            year = year or prefix_year
+    try:
+        async with asyncio.timeout(5):
+            series_list = await ArrClient("sonarr", config).request("GET", "series")
+    except (ArrError, TimeoutError):
+        return None
+    if not isinstance(series_list, list):
+        return None
+    matches = [
+        show
+        for show in series_list
+        if isinstance(show, dict)
+        and isinstance(show.get("title"), str)
+        and normalized_title(show["title"]) in label_keys
+        and (not year or show.get("year") == year)
+    ]
+    if len(matches) != 1:
+        return None
+    show = matches[0]
+    identity, release_year = show.get("id"), show.get("year")
+    if not (isinstance(identity, int) and identity > 0):
+        return None
+    clean_year = release_year if isinstance(release_year, int) and release_year >= 1920 else year
+    return MetadataMatch(
+        title=show["title"],
+        year=clean_year,
+        media_type="tv",
+        confidence=0.95,
+        source="sonarr",
+        external_id=str(identity),
+    )
+
+
 class MetadataResolver:
     def __init__(self, tmdb_token: str | None = None):
         self.tmdb_token = tmdb_token
@@ -256,7 +304,7 @@ class MetadataResolver:
             poster = next(iter(candidates.values()))
             if not re.fullmatch(r"/[A-Za-z0-9_-]+\.jpg", poster):
                 return False
-            image = await client.get(f"https://image.tmdb.org/t/p/w500{poster}")
+            image = await client.get(f"https://image.tmdb.org/t/p/w780{poster}")
             image.raise_for_status()
             if len(image.content) > 8_000_000 or not image.content.startswith(b"\xff\xd8"):
                 raise ValueError("Invalid poster image")

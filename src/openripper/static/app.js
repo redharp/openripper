@@ -1394,8 +1394,8 @@ function loadAdvancedSettings(p, busy) {
     .then((c) => {
       const posters = c.tmdb_configured ? "TMDB is configured." : "Add a TMDB token for posters.";
       const thumbnails = c.ffmpeg_available
-        ? "FFmpeg is available for episode thumbnails and movie previews."
-        : "Install FFmpeg on the server for local thumbnails.";
+        ? "FFmpeg is available for cached dashboard previews."
+        : "Install FFmpeg on the server for cached dashboard previews.";
       $("#artwork-status").textContent = `${posters} ${thumbnails}`;
       $("#handbrake-status").textContent = c.handbrake_available
         ? "Configured HandBrake CLI found on this server."
